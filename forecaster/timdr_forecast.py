@@ -82,7 +82,11 @@ class TIMDRForecast:
             return {"forecast": [last] * steps, "lower": [last] * steps, "upper": [last] * steps,
                     "slope_per_hour": 0.0, "timdr_adjustment": "brak_danych"}
 
-        mean, std = j_compress(window)
+        # NAPRAWIONE: j_compress zwraca teraz dict (falkowa kompresja v2),
+        # nie krotke (mean, std) jak w starym API. Rozpakowujemy z dict,
+        # zamiast `mean, std = j_compress(window)`, co rzucalo ValueError.
+        compressed = j_compress(window)
+        mean, std = compressed['mean'], compressed['std']
         std = std or 1e-6
 
         skret_idx = _recent_signal_indices(timdr_results, "skręt", param, len(window))
