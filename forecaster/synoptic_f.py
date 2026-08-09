@@ -13,15 +13,16 @@ from datetime import datetime, timedelta
 class SynopticF:
     def __init__(self, figure_window=7):
         self.figure_window = figure_window
-    
+
     def _extract_figure(self, df: pd.DataFrame, param: str):
         data = df[param].dropna().tolist()
         if len(data) < self.figure_window:
             window = data
         else:
             window = data[-self.figure_window:]
-        
-        mean, std = j_compress(window)
+
+        compressed = j_compress(window)
+        mean, std = compressed['mean'], compressed['std']
         return {
             'param': param,
             'window': window,
@@ -29,45 +30,45 @@ class SynopticF:
             'std': std,
             'length': len(window)
         }
-    
+
     def _generate_forecast(self, figure, steps):
         mean, std = figure['mean'], figure['std']
         return j_decompress(mean, std, steps)
-    
+
     def predict(self, df: pd.DataFrame, horizon_days: int = None) -> dict:
         if horizon_days is None:
             horizon_days = self.figure_window
-        
+
         params = ['temp', 'pressure', 'humidity', 'wind_speed', 'wind_dir']
         results = {}
-        
+
         for param in params:
             if param not in df.columns:
                 continue
-            
+
             figure = self._extract_figure(df, param)
             forecast = self._generate_forecast(figure, horizon_days * 24)
-            
+
             last_date = pd.to_datetime(df['datetime'].iloc[-1])
             forecast_dates = [last_date + timedelta(hours=i+1) for i in range(len(forecast))]
-            
+
             results[param] = {
                 'figure': figure,
                 'forecast': forecast,
                 'dates': forecast_dates,
                 'horizon_days': horizon_days
             }
-        
+
         return results
-    
+
     def predict_daily(self, df: pd.DataFrame, horizon_days: int = None) -> dict:
         results = self.predict(df, horizon_days)
         daily_results = {}
-        
+
         for param, data in results.items():
             forecast = data['forecast']
             dates = data['dates']
-            
+
             daily_forecast = []
             daily_dates = []
             for i in range(0, len(forecast), 24):
@@ -83,11 +84,11 @@ class SynopticF:
                     else:
                         daily_forecast.append(sum(chunk) / len(chunk))
                     daily_dates.append(dates[i].date() if i < len(dates) else None)
-            
+
             daily_results[param] = {
                 'daily_forecast': daily_forecast,
                 'dates': daily_dates,
                 'horizon_days': len(daily_forecast)
             }
-        
+
         return daily_results
