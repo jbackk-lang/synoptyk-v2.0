@@ -267,12 +267,16 @@ def run_simulation(
                     typ = f"+{delta}d"
 
                 # korekta UHI + lapse rate + falkowa
-                t_min  = _uhi_lapse(row_s["temp_min"],  uhi, alt, "temp") + round(base_correction, 1)
-                t_avg  = _uhi_lapse(row_s["temp_avg"],  uhi, alt, "temp") + round(base_correction, 1)
-                t_max  = _uhi_lapse(row_s["temp_max"],  uhi, alt, "temp") + round(base_correction, 1)
-                precip = row_s["precip_sum"]
-                press  = row_s["pressure_avg"]
-                wind   = row_s["wind_max"]
+                # NAPRAWIONE: zaokrąglamy CAŁĄ sumę (nie tylko base_correction),
+                # inaczej szum zmiennoprzecinkowy z _uhi_lapse zostaje w wyniku
+                # (np. "18.400000000000002" zamiast "18.4"). To samo dla
+                # opadów/ciśnienia/wiatru — wcześniej w ogóle nie zaokrąglane.
+                t_min  = round(_uhi_lapse(row_s["temp_min"],  uhi, alt, "temp") + base_correction, 1)
+                t_avg  = round(_uhi_lapse(row_s["temp_avg"],  uhi, alt, "temp") + base_correction, 1)
+                t_max  = round(_uhi_lapse(row_s["temp_max"],  uhi, alt, "temp") + base_correction, 1)
+                precip = round(row_s["precip_sum"], 1)
+                press  = round(row_s["pressure_avg"], 1)
+                wind   = round(row_s["wind_max"], 1)
 
                 # sygnały TIMDR → szersze pasmo (wyświetlane w polu Typ)
                 signals = [k for k in ("anomalia", "defekt", "rezonans") if timdr_results.get(k)]
