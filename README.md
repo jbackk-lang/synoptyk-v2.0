@@ -68,7 +68,8 @@ synoptyk-v2.0/
 │   └── model_icon.py       # prognoza ICON-EU
 │
 ├── analyzer/
-│   ├── timdr_analyzer.py   # detekcja sygnałów TIMDR
+│   ├── timdr_analyzer.py   # detekcja sygnałów TIMDR (skręt/anomalia/rezonans/defekt)
+│   ├── synoptyk_v3.py      # SynoptykV3 — flow/twist/trm/trend/rhythm/anomalies/fronts (KDTree)
 │   ├── adaptive_thresholds.py
 │   └── wind_analyzer.py
 │
@@ -131,8 +132,17 @@ Tabela wyników zawiera kolumny: `Stacja`, `Data`, `Typ` (Dziś/Jutro/+Nd), `Tem
 | `TIMDRForecast` | `forecaster/timdr_forecast.py` | pełen szereg godzinowy | regresja + sygnały TIMDR | forecast + pasmo [lower, upper] |
 | `SynoptykFEngine` | `synoptyk_f.py` | temperatura + wilgotność | filtr falkowy db4 + korekta UHI | point + pasmo |
 | `synoptyk_v2` | `synoptyk/compare.py` + `trend.py` | dane rzeczywiste + ECMWF + ICON | analiza Δ + trend | ΔT, ΔPrec, ΔWind, ΔPressure |
+| `SynoptykV3` | `analyzer/synoptyk_v3.py` | dowolny szereg 1D (t, s) | lokalna regresja LSQ (KDTree) + mediana + autokorelacja | gradient, twist, wygładzenie, cykle, anomalie, fronty |
 
 Domyślny silnik GUI to `SynoptykFEngine` (filtr falkowy) z prognozą z Open-Meteo Forecast API.
+
+### SynoptykV3 — analiza sygnałów (samodzielny moduł)
+
+`analyzer/synoptyk_v3.py` to zestaw lokalnych analiz szeregu czasowego oparty o k najbliższych sąsiadów w czasie (KDTree): `flow` (lokalny gradient LSQ), `twist` (nagłe zmiany kierunku), `trm` (medianowe wygładzenie), `trend` (globalny dryf), `rhythm` (autokorelacja znormalizowana względem malejącego nakładania się próbek przy rosnącym opóźnieniu), `anomalies` (MAD względem TRM) i `fronts` (punkty, gdzie jednocześnie występuje silny twist i anomalia, dopasowane z tolerancją indeksową — patrz "Znane ograniczenia").
+
+**Nie jest jeszcze podpięty do `forecaster/timdr_forecast.py`** — ten korzysta z osobnego `analyzer/timdr_analyzer.py` (inny format: DataFrame + krotki `'skręt'/'anomalia'/'rezonans'/'defekt'`), podczas gdy `SynoptykV3` pracuje na surowych tablicach `(t, s)` i zwraca indeksy/tablice numpy. Integracja wymagałaby osobnego adaptera.
+
+16 testów w `analyzer/test_synoptyk_v3.py` (pytest), każdy odpowiada konkretnemu, zweryfikowanemu błędowi znalezionemu w trakcie code review — pełna historia poprawek w docstringu modułu.
 
 ---
 
@@ -141,6 +151,7 @@ Domyślny silnik GUI to `SynoptykFEngine` (filtr falkowy) z prognozą z Open-Met
 - `topomap_data.py` zawiera pełne metadane tylko dla 7 miast (Warszawa, Kraków, Gdańsk, Wrocław, Poznań, Katowice, Zakopane). Pozostałe miasta używają domyślnych wartości `lat=52.0, lon=19.0` — współrzędne są pobierane z `get_node_metadata()`, które dla nieznanych miast zwraca fallback ze środka Polski.
 - Open-Meteo Archive API ma opóźnienie ~1–2 dni — dane „wczorajsze" mogą być ostatnimi dostępnymi.
 - `forecaster/validator.py` implementuje MAE i RMSE, ale walidacja out-of-sample nie jest uruchamiana automatycznie.
+- `SynoptykV3.flow()`/`trm()` przy liczbie próbek `n` mieszczącej się w `k_neighbors` (domyślnie 12) cicho degenerują lokalną analizę do jednej globalnej regresji/mediany dla całego okna — sąsiedztwo każdego punktu to wtedy cały zbiór. Kod ostrzega o tym `RuntimeWarning`, ale nie naprawia tego automatycznie; dla krótkich okien zmniejsz `k_neighbors` albo zwiększ liczbę próbek.
 
 ---
 
