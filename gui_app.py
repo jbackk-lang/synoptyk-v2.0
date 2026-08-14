@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from datetime import date, timedelta
 
 import numpy as np
@@ -51,6 +52,12 @@ try:
 except Exception:
     _TIMDR_OK = False
 
+try:
+    from analyzer.synoptyk_v4 import SynoptykV4
+    _V4_OK = True
+except Exception:
+    _V4_OK = False
+
 # ── regiony ────────────────────────────────────────────────────────────────
 REGIONS_MAP: dict[str, list[str]] = {
     "cała_polska": [
@@ -81,13 +88,53 @@ _OPEN_METEO_HOURLY = (
     "relativehumidity_2m"
 )
 _OPEN_METEO_FORECAST = (
-    "temperature_2m,precipitation,surface_pressure,windspeed_10m"
+    # NAPRAWIONE: bylo "surface_pressure" (cisnienie stacyjne, bez redukcji
+    # do poziomu morza), podczas gdy _OPEN_METEO_HOURLY (historia, wyzej)
+    # od zawsze uzywalo "pressure_msl" (zredukowane do poziomu morza) -
+    # ta niespojnosc W TYM SAMYM PLIKU dawala ~27-30 hPa systematycznej
+    # roznicy wzgledem realnych pomiarow IMGW/AccuWeather dla Krakowa
+    # (~220 m n.p.m., typowa korekta stacja->poziom morza to ok. 25-30 hPa -
+    # zweryfikowane: 998.7 hPa (prognoza, surface_pressure) vs 1028 hPa
+    # (realny pomiar, zawsze podawany jako QFF/poziom morza) dla tego
+    # samego dnia i miasta). Teraz obie funkcje uzywaja pressure_msl,
+    # wiec prognoza i realne pomiary sa porownywalne bez przeliczania.
+    "temperature_2m,precipitation,pressure_msl,windspeed_10m,winddirection_10m"
 )
+
+# 8 kierunków, strzalka pokazuje DOKAD wieje wiatr (nie skad - to odwrotnosc
+# meteorologicznego "kierunku" 0-360, ktory podaje ZRODLO wiatru). Wybrane
+# bo tak intuicyjniej czyta sie pojedyncza strzalke w waskiej komorce tabeli.
+_WIND_ARROWS = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # helpers
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _circular_mean_deg(values) -> float:
+    """Srednia kierunku wiatru (stopnie 0-360) - zwykla srednia arytmetyczna
+    dawalaby bledny wynik przy wartosciach blisko granicy 0/360 (np. srednia
+    z 350 i 10 to fizycznie 0, nie 180). Patrz analyzer/synoptyk_v4.py,
+    forecast_wind_direction() - ten sam mechanizm (srednia wektorowa)."""
+    arr = np.asarray(values, dtype=float)
+    arr = arr[~np.isnan(arr)]
+    if len(arr) == 0:
+        return float("nan")
+    rad = np.radians(arr)
+    u = np.mean(np.sin(rad))
+    v = np.mean(np.cos(rad))
+    return (np.degrees(np.arctan2(u, v)) + 360) % 360
+
+
+def _wind_arrow(deg_from: float) -> str:
+    """Zamienia kierunek meteorologiczny (skad wieje) na pojedyncza strzalke
+    pokazujaca DOKAD wieje (deg_from + 180), zaokraglona do 1 z 8 kierunkow."""
+    if deg_from != deg_from:  # NaN check bez importu math/np tutaj
+        return "–"
+    deg_to = (deg_from + 180.0) % 360.0
+    idx = int(((deg_to + 22.5) % 360.0) // 45.0)
+    return _WIND_ARROWS[idx]
+
 
 def _get_coords(node: str) -> tuple[float, float]:
     if _TOPO_OK and node in TOPOGRAPHY_DATABASE:
@@ -140,23 +187,27 @@ def _fetch_forecast(lat: float, lon: float, days_ahead: int) -> pd.DataFrame:
         "time":     pd.to_datetime(h["time"]),
         "temp":     h["temperature_2m"],
         "precip":   h["precipitation"],
-        "pressure": h["surface_pressure"],
+        "pressure": h["pressure_msl"],
         "wind":     h["windspeed_10m"],
+        "wind_dir": h["winddirection_10m"],
     }).set_index("time")
     return df
 
 
 def _daily_stats(df: pd.DataFrame) -> pd.DataFrame:
-    """Resample godzinowy → dzienny (min/avg/max)."""
+    """Resample godzinowy → dzienny (min/avg/max). Kierunek wiatru agregowany
+    srednia wektorowa (_circular_mean_deg), nie zwykla srednia - patrz jej
+    docstring."""
     agg = df.resample("1D").agg({
         "temp":     ["min", "mean", "max"],
         "precip":   "sum",
         "pressure": "mean",
         "wind":     "max",
+        "wind_dir": _circular_mean_deg,
     })
     agg.columns = [
         "temp_min", "temp_avg", "temp_max",
-        "precip_sum", "pressure_avg", "wind_max",
+        "precip_sum", "pressure_avg", "wind_max", "wind_dir_avg",
     ]
     return agg.round(1)
 
@@ -212,6 +263,7 @@ def run_simulation(
                     "Stacja": node, "Data": str(day), "Typ": "DEMO",
                     "Temp min [°C]": "–", "Temp śr [°C]": "–", "Temp max [°C]": "–",
                     "Opady [mm]": "–", "Ciśnienie [hPa]": "–", "Wiatr max [km/h]": "–",
+                    "Kier.": "–", "Temp śr V4 [°C]": "–",
                 })
             continue
 
@@ -250,6 +302,42 @@ def run_simulation(
             except Exception:
                 pass
 
+        # ── SynoptykV4: rownolegly silnik prognozy (ekstrapolacja trendu z
+        # rzeczywistej historii, NIE z modelu Open-Meteo) - dodany do
+        # porownania obok istniejacego silnika (Open-Meteo + korekta
+        # falkowa/UHI). Nie zastepuje niczego - liczony jest tylko dodatkowo,
+        # zeby mozna bylo obserwowac przez kilka dni, ktory jest blizej
+        # rzeczywistych pomiarow, zanim cokolwiek zostanie podmienione
+        # na stale jako domyslny. Uzywa dziennej sredniej z tej samej
+        # historii co korekta falkowa powyzej - BEZ dodatkowej korekty
+        # UHI/lapse rate, bo te efekty sa juz obecne w realnych pomiarach
+        # historycznych (w odroznieniu od prognozy modelu siatkowego
+        # Open-Meteo, ktora ich nie uwzglednia i dlatego wymaga korekty).
+        v4_forecast = None
+        if _V4_OK and df_hist is not None:
+            try:
+                daily_hist = df_hist["temp"].dropna().resample("1D").mean().dropna()
+                if len(daily_hist) >= 2:
+                    t_hist = np.arange(len(daily_hist), dtype=float)
+                    s_hist = daily_hist.to_numpy(dtype=float)
+                    # k_neighbors=5: przy domyslnym suwaku "Historia" (7 dni)
+                    # resampled do dziennych wartosci daje n=7 punktow - z
+                    # k_neighbors=8 (domyslny w SynoptykV4) kazde wywolanie
+                    # odpalaloby RuntimeWarning o degeneracji do global-fit
+                    # (patrz analyzer/synoptyk_v4.py, "Znane ograniczenia").
+                    # Dla n~7 dziennych probek globalny trend i tak jest
+                    # najbardziej sensowna interpretacja (nie ma tu miejsca
+                    # na "lokalna" analize w skali podobowej), wiec k=5 tylko
+                    # wycisza szum ostrzezen bez zmiany sensu wyniku - dla
+                    # dluzszej historii (suwak >5 dni) nadal daje lokalnosc.
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        v4_forecast = SynoptykV4(k_neighbors=5).forecast(
+                            t_hist, s_hist, steps_ahead=forecast_days, damping=0.85,
+                        )
+            except Exception:
+                pass
+
         # ── prognoza Open-Meteo ─────────────────────────────────────────────
         try:
             df_fc = _fetch_forecast(lat, lon, forecast_days)
@@ -277,11 +365,20 @@ def run_simulation(
                 precip = round(row_s["precip_sum"], 1)
                 press  = round(row_s["pressure_avg"], 1)
                 wind   = round(row_s["wind_max"], 1)
+                wind_arrow = _wind_arrow(row_s.get("wind_dir_avg", float("nan")))
 
                 # sygnały TIMDR → szersze pasmo (wyświetlane w polu Typ)
                 signals = [k for k in ("anomalia", "defekt", "rezonans") if timdr_results.get(k)]
                 if signals:
                     typ += f" ⚡{'·'.join(s[:3] for s in signals)}"
+
+                # SynoptykV4 - rownolegly punkt + pasmo (patrz komentarz wyzej)
+                v4_str = "–"
+                if v4_forecast is not None and day_idx < len(v4_forecast["point"]):
+                    v4_point = round(float(v4_forecast["point"][day_idx]), 1)
+                    v4_lower = round(float(v4_forecast["lower"][day_idx]), 1)
+                    v4_upper = round(float(v4_forecast["upper"][day_idx]), 1)
+                    v4_str = f"{v4_point} [{v4_lower}–{v4_upper}]"
 
                 rows.append({
                     "Stacja":          node,
@@ -293,7 +390,9 @@ def run_simulation(
                     "Opady [mm]":      precip,
                     "Ciśnienie [hPa]": press,
                     "Wiatr max [km/h]":wind,
+                    "Kier.":           wind_arrow,
                     "Dane hist. do":   data_end_str,
+                    "Temp śr V4 [°C]": v4_str,
                 })
 
         except Exception as e:
@@ -304,8 +403,8 @@ def run_simulation(
     cols_order = [
         "Stacja", "Data", "Typ",
         "Temp min [°C]", "Temp śr [°C]", "Temp max [°C]",
-        "Opady [mm]", "Ciśnienie [hPa]", "Wiatr max [km/h]",
-        "Dane hist. do",
+        "Opady [mm]", "Ciśnienie [hPa]", "Wiatr max [km/h]", "Kier.",
+        "Dane hist. do", "Temp śr V4 [°C]",
     ]
     for c in cols_order:
         if c not in df_out.columns:
@@ -347,7 +446,11 @@ def create_app():
 
         with gr.Row():
             # ── panel sterowania ──────────────────────────────────────────
-            with gr.Column(scale=1, min_width=260):
+            # NAPRAWIONE: lewa kolumna byla scale=1 vs prawa scale=3 (25%
+            # szerokosci) - zmniejszone do wezszej proporcji, zeby wiecej
+            # miejsca zostalo dla tabeli prognozy (teraz i tak szerszej,
+            # bo doszly kolumny "Kier." i "Temp śr V4").
+            with gr.Column(scale=1, min_width=220):
 
                 mode = gr.Radio(
                     choices=["Cały Region", "Pojedyncze miasto"],
@@ -381,27 +484,38 @@ def create_app():
 
                 gr.Markdown(
                     "ℹ️ Prognoza pochodzi z Open-Meteo Forecast API. "
-                    "Korekta UHI i filtr falkowy (db4) są stosowane na temperaturze.",
+                    "Korekta UHI i filtr falkowy (db4) są stosowane na temperaturze. "
+                    "Kolumna „Temp śr V4” to niezależny, eksperymentalny silnik "
+                    "(SynoptykV4 — ekstrapolacja trendu z rzeczywistej historii, "
+                    "bez modelu Open-Meteo) pokazywany obok do porównania.",
                     elem_id="warn",
                 )
 
                 btn = gr.Button("▶ Uruchom prognozę", variant="primary", size="lg")
 
             # ── wyniki ────────────────────────────────────────────────────
-            with gr.Column(scale=3):
-                logs_box = gr.Textbox(
-                    label="Dziennik",
-                    lines=3,
-                    placeholder="Tutaj pojawią się informacje o pobieraniu danych...",
-                )
+            with gr.Column(scale=6):
+                # NAPRAWIONE: "Dziennik" byl zwyklym, zawsze rozwinietym
+                # Textbox(lines=3) nad tabela - naglowek + pole zajmowaly
+                # zauwazalna czesc wysokosci prawej kolumny, kosztem tabeli
+                # prognozy (glownej tresci). Teraz domyslnie zwiniety w
+                # Accordion - rozwija sie na klik, gdy faktycznie trzeba
+                # zobaczyc logi/ostrzezenia.
+                with gr.Accordion("Dziennik", open=False):
+                    logs_box = gr.Textbox(
+                        label="",
+                        lines=2,
+                        show_label=False,
+                        placeholder="Tutaj pojawią się informacje o pobieraniu danych...",
+                    )
                 table = gr.Dataframe(
                     label="Prognoza wielodniowa",
                     wrap=True,
                     column_widths=[
                         "120px", "95px", "75px",
                         "100px", "100px", "100px",
-                        "90px", "110px", "120px",
-                        "105px",
+                        "90px", "110px", "110px", "45px",
+                        "105px", "150px",
                     ],
                 )
 

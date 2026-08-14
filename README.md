@@ -107,7 +107,15 @@ synoptyk-v2.0/
 | Prognoza (dni) | Liczba dni naprzód w tabeli wyników (1–14) |
 | Tryb Demo | Dane zastępcze „–" gdy brak dostępu do API |
 
-Tabela wyników zawiera kolumny: `Stacja`, `Data`, `Typ` (Dziś/Jutro/+Nd), `Temp min`, `Temp śr`, `Temp max`, `Opady [mm]`, `Ciśnienie [hPa]`, `Wiatr max [km/h]`, `Dane hist. do`.
+Tabela wyników zawiera kolumny: `Stacja`, `Data`, `Typ` (Dziś/Jutro/+Nd), `Temp min`, `Temp śr`, `Temp max`, `Opady [mm]`, `Ciśnienie [hPa]`, `Wiatr max [km/h]`, `Kier.`, `Dane hist. do`, `Temp śr V4 [°C]`.
+
+`Kier.` (nowa) — kierunek wiatru jako pojedyncza strzałka (↑↗→↘↓↙←↖, 8 kierunków), licząca **dokąd** wiatr wieje (nie skąd — to odwrotność meteorologicznego kąta 0–360°). Dzienna wartość to średnia wektorowa (kołowa) godzinowych odczytów, nie zwykła średnia arytmetyczna — patrz `_circular_mean_deg()` w `gui_app.py` (ten sam mechanizm co `SynoptykV4.forecast_wind_direction()`).
+
+`Temp śr V4 [°C]` (nowa) — niezależny, eksperymentalny silnik `SynoptykV4.forecast()` (ekstrapolacja trendu z rzeczywistej historii, bez modelu Open-Meteo), pokazany **obok** głównej prognozy do porównania przez kilka dni, zanim ewentualnie zastąpi coś na stałe. Format: `punkt [dolny–górny]`.
+
+Panel sterowania (lewa kolumna) zwężony, a „Dziennik” domyślnie zwinięty w rozwijaną sekcję nad tabelą — więcej miejsca dla prognozy, która teraz i tak ma więcej kolumn.
+
+**NAPRAWIONE**: `Ciśnienie [hPa]` w prognozie wcześniej pochodziło z pola Open-Meteo `surface_pressure` (ciśnienie stacyjne, bez redukcji do poziomu morza), podczas gdy dane historyczne (używane m.in. do filtra falkowego) zawsze pobierały `pressure_msl` (poziom morza) — ta niespójność w jednym pliku dawała ~27–30 hPa systematycznej różnicy względem realnych pomiarów IMGW/AccuWeather (zweryfikowane: 998.7 hPa prognoza vs 1028 hPa pomiar, dla Krakowa ~220 m n.p.m., gdzie korekta stacja→poziom morza wynosi właśnie ~25–30 hPa). Teraz obie ścieżki używają `pressure_msl`.
 
 ---
 
@@ -136,7 +144,7 @@ Tabela wyników zawiera kolumny: `Stacja`, `Data`, `Typ` (Dziś/Jutro/+Nd), `Tem
 | `SynoptykV3` | `analyzer/synoptyk_v3.py` | dowolny szereg 1D (t, s) | lokalna regresja LSQ (KDTree) + mediana + autokorelacja | gradient, twist, wygładzenie, cykle, anomalie, fronty |
 | `SynoptykV4` | `analyzer/synoptyk_v4.py` | dowolny szereg 1D (t, s); wiatr: prędkość (t, s) + kierunek (t, stopnie 0–360) | j.w. + tłumiona ekstrapolacja trendu (mean reversion) | gradient, twist, wygładzenie, anomalie, fronty, `forecast()` (point/lower/upper) dla dowolnej zmiennej, `forecast_wind_speed()`, `forecast_wind_direction()` (kołowa, spread w stopniach), `circular_anomalies()` |
 
-Domyślny silnik GUI to `SynoptykFEngine` (filtr falkowy) z prognozą z Open-Meteo Forecast API.
+Domyślny silnik GUI to `SynoptykFEngine` (filtr falkowy) z prognozą z Open-Meteo Forecast API. Od tej wersji `SynoptykV4.forecast()` jest liczony **równolegle** (kolumna `Temp śr V4 [°C]`) i pokazywany obok — nie zastępuje domyślnego silnika, służy do porównania przez kilka dni z rzeczywistymi pomiarami przed ewentualną podmianą na stałe.
 
 ### SynoptykV3 — analiza sygnałów (samodzielny moduł)
 
