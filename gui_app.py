@@ -8,6 +8,11 @@ Zmiany względem oryginału:
   • wyraźna informacja o dacie ostatnich danych (koniec cache'a vs. live)
   • ostrzeżenie w GUI gdy dane są starsze niż 2 doby
   • weather_cache.db pomijane – dane zawsze świeże z API
+  • NAPRAWIONE: daleki horyzont (+3d..+13d) stabilizowany mieszanką z
+    własną deterministyczną ekstrapolacją trendu (SynoptykV4) - Open-Meteo
+    samo potrafi mocno zmieniać prognozę między pobraniami tego samego dnia
+    na tym horyzoncie (przelicza swój model NWP kilka razy dziennie) -
+    patrz _blend_weight()/_own_trend_points() niżej
 """
 
 from __future__ import annotations
@@ -220,6 +225,72 @@ def _uhi_lapse(val: float, uhi: float, alt: int, col: str) -> float:
     return val
 
 
+def _own_trend_points(df_hist: pd.DataFrame, col: str, how: str, steps_ahead: int) -> np.ndarray | None:
+    """Własna, w pełni deterministyczna ekstrapolacja trendu (SynoptykV4.forecast)
+    na dziennie zagregowanej serii z REALNEJ historii (nie z modelu Open-Meteo).
+
+    Po co: uruchomiona dwa razy tego samego dnia na tych samych danych
+    historycznych zawsze da identyczny wynik — w odróżnieniu od
+    _fetch_forecast(), które odpytuje live Open-Meteo i może zwrócić inne
+    wartości za każdym razem, bo dostawca sam przelicza swój model NWP
+    kilka razy dziennie (patrz _blend_weight niżej i komentarz w
+    run_simulation przy `w = _blend_weight(...)`).
+
+    how: "mean" | "min" | "max" — jak agregować godzinowe dane do dziennych
+    przed ekstrapolacją (żeby np. dla temp_min ekstrapolować trend samych
+    dobowych minimów, nie średnich).
+    """
+    if not _V4_OK or df_hist is None or col not in df_hist.columns:
+        return None
+    s = df_hist[col].dropna()
+    if how == "min":
+        daily = s.resample("1D").min().dropna()
+    elif how == "max":
+        daily = s.resample("1D").max().dropna()
+    else:
+        daily = s.resample("1D").mean().dropna()
+    if len(daily) < 2:
+        return None
+    try:
+        t_hist = np.arange(len(daily), dtype=float)
+        s_hist = daily.to_numpy(dtype=float)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            # k_neighbors=5: patrz wyjaśnienie przy istniejącym v4_forecast
+            # w run_simulation — to samo uzasadnienie dotyczy tutaj.
+            fc = SynoptykV4(k_neighbors=5).forecast(
+                t_hist, s_hist, steps_ahead=steps_ahead, damping=0.85,
+            )
+        return np.asarray(fc["point"], dtype=float)
+    except Exception:
+        return None
+
+
+def _blend_weight(lead_days: int) -> float:
+    """Waga własnej ekstrapolacji trendu w mieszance z live-prognozą Open-Meteo.
+
+    0.0 dla dni 0-2 (pełne zaufanie do świeżej prognozy modelu — na krótkim
+    horyzoncie ona i tak jest trafniejsza niż prosta ekstrapolacja trendu),
+    rośnie liniowo do 1.0 przy +10d i dalej.
+
+    Uzasadnienie: dla dalekiego horyzontu (+4d..+13d) Open-Meteo samo w
+    sobie potrafi mocno zmienić prognozę między dwoma pobraniami zrobionymi
+    tego samego dnia (własny model NWP dostawcy przelicza się kilka razy
+    dziennie) — zaobserwowane empirycznie w krakow_forecast_snapshots.csv
+    (patrz pull_seq 2 vs 3 dla issue_date=2026-08-16: +4d..+9d skoczyło o
+    2-5°C, opad jutra 12.1mm→33.3mm, w ciągu tego samego dnia). Własna
+    ekstrapolacja trendu (SynoptykV4, patrz _own_trend_points) jest
+    deterministyczna względem tej samej historii, więc mieszanie w nią
+    tłumi tę niestabilność kosztem części "świeżości" modelu na dalekim
+    horyzoncie, gdzie i tak jego skuteczność jest ograniczona.
+
+    Nie dotyczy opadów — trend liniowy z historii opadów nie ma sensu dla
+    zjawiska tak progowego/skokowego jak opad; ta kolumna zostaje czystym
+    przepuszczeniem z API bez mieszania.
+    """
+    return max(0.0, min(1.0, (lead_days - 2) / 8.0))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # główna funkcja backendu
 # ══════════════════════════════════════════════════════════════════════════════
@@ -338,6 +409,16 @@ def run_simulation(
             except Exception:
                 pass
 
+        # ── własna ekstrapolacja trendu dla pozostałych parametrów ─────────
+        # (temp_avg już mamy z v4_forecast powyżej — reużywamy go zamiast
+        # liczyć drugi raz to samo). Patrz _own_trend_points/_blend_weight
+        # wyżej po pełne uzasadnienie i skąd wzięła się potrzeba tego.
+        own_temp_avg = np.asarray(v4_forecast["point"], dtype=float) if v4_forecast is not None else None
+        own_temp_min = _own_trend_points(df_hist, "temp", "min", forecast_days)
+        own_temp_max = _own_trend_points(df_hist, "temp", "max", forecast_days)
+        own_pressure = _own_trend_points(df_hist, "pressure", "mean", forecast_days)
+        own_wind     = _own_trend_points(df_hist, "wind", "max", forecast_days)
+
         # ── prognoza Open-Meteo ─────────────────────────────────────────────
         try:
             df_fc = _fetch_forecast(lat, lon, forecast_days)
@@ -366,6 +447,21 @@ def run_simulation(
                 press  = round(row_s["pressure_avg"], 1)
                 wind   = round(row_s["wind_max"], 1)
                 wind_arrow = _wind_arrow(row_s.get("wind_dir_avg", float("nan")))
+
+                # ── stabilizacja dalekiego horyzontu własną ekstrapolacją ──
+                # (patrz _blend_weight: nie dotyczy opadów, ani dni 0-2)
+                w = _blend_weight(day_idx)
+                if w > 0.0:
+                    if own_temp_min is not None and day_idx < len(own_temp_min):
+                        t_min = round((1 - w) * t_min + w * float(own_temp_min[day_idx]), 1)
+                    if own_temp_avg is not None and day_idx < len(own_temp_avg):
+                        t_avg = round((1 - w) * t_avg + w * float(own_temp_avg[day_idx]), 1)
+                    if own_temp_max is not None and day_idx < len(own_temp_max):
+                        t_max = round((1 - w) * t_max + w * float(own_temp_max[day_idx]), 1)
+                    if own_pressure is not None and day_idx < len(own_pressure):
+                        press = round((1 - w) * press + w * float(own_pressure[day_idx]), 1)
+                    if own_wind is not None and day_idx < len(own_wind):
+                        wind = round((1 - w) * wind + w * float(own_wind[day_idx]), 1)
 
                 # sygnały TIMDR → szersze pasmo (wyświetlane w polu Typ)
                 signals = [k for k in ("anomalia", "defekt", "rezonans") if timdr_results.get(k)]
