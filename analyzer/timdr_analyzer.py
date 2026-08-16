@@ -14,16 +14,32 @@ class TIMDRAnalyzer:
             'rezonans': [],
             'defekt': []
         }
-        
+
+        # NAPRAWIONE: gdy climatology/cache są puste (normalny stan dla
+        # gui_app.py), get_thresholds() liczy statystyki na żywo z
+        # fallback_df zamiast bezwarunkowo zwracać {mean:0, std:1, low:-2,
+        # high:2} - patrz komentarz w adaptive_thresholds.py __init__.
+        # Ustawiamy tu, bo to samo df, które analizujemy, jest jedynymi
+        # danymi jakie mamy do dyspozycji jako baza kalibracji.
+        self.thresholds.fallback_df = df
+
         # Dodatkowa analiza wiatru
         wind = WindAnalyzer(df)
         wind_sudden = wind.sudden_direction_change()
         if wind_sudden:
             results['defekt'].append(('wind_dir', 'nagła zmiana kierunku', None))
         
+        # DODANE: 'precip' było pominięte - anomalia/defekt/rezonans/skręt
+        # liczyły się dla temp/pressure/humidity/wind_speed, ale nigdy dla
+        # opadów, mimo że to one najbardziej potrzebują wykrywania anomalii
+        # zamiast (nieistniejącego tu i tak) trendu - opad jest zjawiskiem
+        # progowym/skokowym, więc is_anomaly()/is_defect() (progi z rozstępu
+        # p10-p90, nie z liniowej ekstrapolacji) pasują do niego dobrze,
+        # w odróżnieniu od np. SynoptykV4.forecast()/_blend_weight() w
+        # gui_app.py, które celowo NIE są stosowane do opadów.
         for idx, row in df.iterrows():
             dt = pd.to_datetime(row['datetime'])
-            params = ['temp', 'pressure', 'humidity', 'wind_speed']
+            params = ['temp', 'pressure', 'humidity', 'wind_speed', 'precip']
             
             anomalies_today = []
             for param in params:
