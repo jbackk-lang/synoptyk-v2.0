@@ -22,6 +22,7 @@ Zmiany względem oryginału:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import warnings
@@ -308,12 +309,62 @@ def _blend_weight(lead_days: int) -> float:
     return max(0.0, min(1.0, (lead_days - 2) / 8.0))
 
 
-# Pamięć ostatniego pulla per (stacja, data docelowa) — w procesie GUI,
-# resetuje się przy restarcie appki. Celowo najprostsza możliwa forma
-# (dict w pamięci), bo problem do rozwiązania jest jeden: wykryć skok
-# między dwoma kolejnymi uruchomieniami tego samego dnia dla tego samego
-# dnia docelowego, nie budować pełnej historii.
-_LAST_PULL: dict[tuple[str, str], dict] = {}
+# Pamięć ostatniego pulla per (stacja, data docelowa).
+# NAPRAWIONE: pierwotnie zwykły dict w pamięci procesu — restart serwera
+# (Ctrl+C + ponowne `python gui_app.py`, albo po prostu zamknięcie okna
+# terminala między sprawdzeniami w ciągu dnia) czyścił go do zera, więc
+# _LAST_PULL nigdy nie miał z czym porównać pierwszego pulla po restarcie
+# i ⚡EV milczał, dopóki nie zrobiono dwóch pulli bez zamykania appki
+# między nimi — w praktyce prawie nigdy. Teraz zapisywany na dysk (mały
+# plik JSON obok gui_app.py) i wczytywany przy starcie modułu, więc
+# przetrwa restart. To NIE jest baza danych — jeśli plik zniknie/uszkodzi
+# się, po prostu zaczyna się od pustej pamięci (fail-safe, nie fail-loud).
+_LAST_PULL_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_last_pull_cache.json")
+
+
+def _load_last_pull_cache() -> dict[tuple[str, str], dict]:
+    try:
+        with open(_LAST_PULL_CACHE_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        return {tuple(k.split("|", 1)): v for k, v in raw.items()}
+    except Exception:
+        return {}
+
+
+def _save_last_pull_cache(cache: dict[tuple[str, str], dict]) -> None:
+    try:
+        raw = {f"{k[0]}|{k[1]}": v for k, v in cache.items()}
+        with open(_LAST_PULL_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+    except Exception:
+        pass  # cache to wygoda, nie krytyczna sciezka - nie wywalamy appki przez to
+
+
+_LAST_PULL: dict[tuple[str, str], dict] = _load_last_pull_cache()
+
+
+_BIAS_BADGE_SOLID_N = 15  # próg "solidnej" próbki - patrz _bias_badge() niżej
+
+
+def _bias_badge(lead_days: int, bias_table: dict, solid_n: int = _BIAS_BADGE_SOLID_N) -> str:
+    """Kolorowy znaczek statusu korekty obciążenia dla danego lead_days:
+      🔴 czerwony    - korekta jeszcze niedostępna (lead_days spoza bias_table,
+                        czyli < min_samples sparowanych obserwacji - patrz
+                        forecaster/bias_correction.py)
+      🟠 pomarańczowy - korekta aktywna, ale na małej próbce (min_samples..solid_n-1)
+                        - traktuj jako orientacyjną, nie w pełni wiarygodną
+      🟢 zielony      - korekta aktywna, na solidniejszej próbce (>= solid_n)
+
+    Próg solid_n=15 jest heurystyczny (nie ma tu formalnego testu istotności
+    statystycznej) - wybrany na oko jako "ponad dwa tygodnie codziennych
+    pulli", nie coś wyliczonego z rozkładu błędu. Kolorowe kółka to zwykłe
+    znaki Unicode (nie wymagają HTML/CSS w tabeli Gradio), więc działają
+    identycznie w gr.Dataframe jak zwykły tekst.
+    """
+    entry = bias_table.get(int(lead_days))
+    if entry is None:
+        return "🔴"
+    return "🟢" if entry["n"] >= solid_n else "🟠"
 
 
 def detect_engine_volatility(prev_row: dict, new_row: dict) -> dict:
@@ -524,9 +575,13 @@ def run_simulation(
                         wind = round((1 - w) * wind + w * float(own_wind[day_idx]), 1)
 
                 # ── korekta obciążenia z historii (patrz log wyżej) ────────
+                # Kolorowy znaczek zamiast płaskiego 🎯 - patrz _bias_badge()
+                # niżej po progi i uzasadnienie. Doklejany do KAŻDEGO dnia
+                # (nie tylko aktywnych), żeby czerwony "jeszcze niedostępne"
+                # było widoczne wprost, a nie domyślne przez brak znaczka.
                 if day_idx in bias_table:
                     t_avg = apply_bias_correction(t_avg, day_idx, bias_table)
-                    typ += " 🎯"
+                typ += " " + _bias_badge(day_idx, bias_table)
 
                 # sygnały TIMDR → szersze pasmo (wyświetlane w polu Typ)
                 signals = [k for k in ("anomalia", "defekt", "rezonans") if timdr_results.get(k)]
@@ -582,6 +637,8 @@ def run_simulation(
         if c not in df_out.columns:
             df_out[c] = "–"
     df_out = df_out[cols_order]
+
+    _save_last_pull_cache(_LAST_PULL)
 
     log_str = "\n".join(logs) if logs else "✔ Dane pobrane bez błędów."
     return log_str, df_out
@@ -660,6 +717,17 @@ def create_app():
                     "Kolumna „Temp śr V4” to niezależny, eksperymentalny silnik "
                     "(SynoptykV4 — ekstrapolacja trendu z rzeczywistej historii, "
                     "bez modelu Open-Meteo) pokazywany obok do porównania.",
+                    elem_id="warn",
+                )
+
+                gr.Markdown(
+                    "**Znaczek przy dacie (Typ) — korekta obciążenia:**\n"
+                    "🟢 aktywna, solidna próbka (≥15 sparowanych pulli) · "
+                    "🟠 aktywna, mała próbka (uwaga, orientacyjna) · "
+                    "🔴 jeszcze niedostępna (za mało danych w historii)\n\n"
+                    "Dodatkowo: `⚡EV` = wykryty skok głównego silnika względem "
+                    "poprzedniego uruchomienia; `⚡anomalia/defekt/rezonans` = "
+                    "aktywny sygnał TIMDR.",
                     elem_id="warn",
                 )
 

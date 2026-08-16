@@ -113,7 +113,17 @@ Tabela wyników zawiera kolumny: `Stacja`, `Data`, `Typ` (Dziś/Jutro/+Nd), `Tem
 
 `Temp śr V4 [°C]` (nowa) — niezależny, eksperymentalny silnik `SynoptykV4.forecast()` (ekstrapolacja trendu z rzeczywistej historii, bez modelu Open-Meteo), pokazany **obok** głównej prognozy do porównania przez kilka dni, zanim ewentualnie zastąpi coś na stałe. Format: `punkt [dolny–górny]`.
 
-**DODANE — korekta obciążenia**: `Temp śr [°C]` dostaje symbol `🎯` obok `Typ`, gdy dla danego lead_days jest już wystarczająco historii (≥5 sparowanych pulli prognoza/rzeczywistość w `krakow_forecast_snapshots.csv`), żeby zastosować wyliczoną korektę systematycznego błędu (`forecaster/bias_correction.py`, `apply_bias_correction()`). To NIE jest model ML — to średni zmierzony błąd (rzeczywistość − prognoza) per lead_days, liczony na żywo z CSV przy każdym uruchomieniu, więc "uczy się" automatycznie w miarę przybywania danych, bez osobnego kroku treningowego. Dopóki próbek jest za mało, korekta się nie włącza (brak `🎯`) — kod o tym informuje wprost w Dzienniku (`🎯 <stacja>: korekta obciążenia jeszcze nieaktywna...` albo listę aktywnych lead_days z liczbą próbek i wielkością korekty).
+**DODANE — korekta obciążenia**: obok `Typ` pojawia się kolorowy znaczek statusu korekty systematycznego błędu (`forecaster/bias_correction.py`, `apply_bias_correction()`, kod: `_bias_badge()` w `gui_app.py`):
+
+| Znaczek | Znaczenie |
+|---|---|
+| 🔴 | korekta jeszcze niedostępna dla tego lead_days — za mało sparowanych obserwacji prognoza/rzeczywistość w CSV (próg `min_samples=5`) |
+| 🟠 | korekta aktywna, ale na małej próbce (5–14 obserwacji) — traktować orientacyjnie |
+| 🟢 | korekta aktywna, solidniejsza próbka (≥15 obserwacji) |
+
+To NIE jest model ML — to średni zmierzony błąd (rzeczywistość − prognoza) per lead_days, liczony na żywo z CSV przy każdym uruchomieniu, więc "uczy się" automatycznie w miarę przybywania danych, bez osobnego kroku treningowego. Próg 15 dla 🟢 jest heurystyczny (na oko, nie z testu istotności statystycznej). Kod dodatkowo informuje o tym samym wprost w Dzienniku (`🎯 <stacja>: korekta obciążenia jeszcze nieaktywna...` albo lista aktywnych lead_days z liczbą próbek i wielkością korekty).
+
+**DODANE — wykrywanie skoku silnika (EV)**: `Typ` dostaje dopisek `⚡EV`, gdy `Temp śr`/`Opady`/`Ciśnienie`/`Wiatr max` dla tego samego dnia docelowego zmieniły się między poprzednim a bieżącym uruchomieniem GUI powyżej progu (odpowiednio 2°C / 10mm / 5hPa / 8km/h) — `detect_engine_volatility()` w `gui_app.py`. **NAPRAWIONE**: pierwotnie pamięć poprzedniego pulla żyła tylko w RAM procesu, więc restart serwera lokalnego (Ctrl+C, zamknięcie terminala między sprawdzeniami w ciągu dnia) czyścił ją do zera i `⚡EV` praktycznie nigdy się nie zapalało. Teraz zapisywana na dysk (`_last_pull_cache.json` obok `gui_app.py`, dopisz do `.gitignore`) i wczytywana przy starcie — przetrwa restart. Jeśli plik zniknie/uszkodzi się, kod po cichu zaczyna od pustej pamięci zamiast się wywalić.
 
 Panel sterowania (lewa kolumna) zwężony, a „Dziennik” domyślnie zwinięty w rozwijaną sekcję nad tabelą — więcej miejsca dla prognozy, która teraz i tak ma więcej kolumn.
 
@@ -191,6 +201,7 @@ data/*.db
 __pycache__/
 *.pyc
 .env
+_last_pull_cache.json
 ```
 
 ---
