@@ -454,7 +454,7 @@ def run_simulation(
     history_days: int,
     forecast_days: int,
     offline_demo: bool,
-) -> tuple[str, pd.DataFrame]:
+) -> tuple[str, pd.DataFrame, str]:
 
     logs: list[str] = []
     rows: list[dict] = []
@@ -677,14 +677,21 @@ def run_simulation(
                     typ += f" ⚡{'·'.join(s[:3] for s in signals)}"
 
                 # ── EV: skok głównego silnika względem poprzedniego pulla ──
+                # DODANE: wydzielone z "Typ" do osobnej kolumny "EV" - "Typ"
+                # zbierał już znaczek korekty + dzień + sygnały TIMDR (prawie
+                # zawsze aktywne, patrz czułość progu opadu) + EV (rzadki,
+                # najbardziej istotny sygnał) w jednym stłoczonym polu, przez
+                # co EV ginęło wzrokiem w gąszczu tekstu. Osobna kolumna =
+                # łatwe skanowanie w dół, w którym wierszu coś skoczyło.
                 current_vals = {
                     "Śr °C": t_avg, "Opad mm": precip,
                     "Ciśn hPa": press, "Wiatr km/h": wind,
                 }
                 pull_key = (node, str(day_label))
                 prev_vals = _LAST_PULL.get(pull_key)
-                if prev_vals is not None and detect_engine_volatility(prev_vals, current_vals):
-                    typ += " ⚡EV"
+                ev_flag = "⚡EV" if (
+                    prev_vals is not None and detect_engine_volatility(prev_vals, current_vals)
+                ) else "–"
                 _LAST_PULL[pull_key] = current_vals
 
                 # SynoptykV4 - rownolegly punkt + pasmo (patrz komentarz wyzej)
@@ -699,6 +706,7 @@ def run_simulation(
                     "Stacja":   node,
                     "Data":     str(day_label),
                     "Typ":      typ,
+                    "EV":       ev_flag,
                     "Min °C":   t_min,
                     "Śr °C":    t_avg,
                     "Max °C":   t_max,
@@ -721,11 +729,14 @@ def run_simulation(
     # jednostki + istotnego słowa (Min/Śr/Max °C, Opad mm, Ciśn hPa,
     # Wiatr km/h, Hist. do, V4 °C) - to i tak jest oczywiste w kontekście
     # tabeli prognozy, więc żadna informacja się nie gubi.
+    # ZMIENIONE: "EV" przeniesione z 4. pozycji (zaraz po "Typ") na sam
+    # koniec, na prawo za "V4 °C" - użytkownik wolał mieć rzadki, najbardziej
+    # "alarmowy" sygnał z boku, nie wciśnięty między "Typ" a kolumny liczbowe.
     cols_order = [
         "Stacja", "Data", "Typ",
         "Min °C", "Śr °C", "Max °C",
         "Opad mm", "Ciśn hPa", "Wiatr km/h", "Kier.",
-        "Hist. do", "V4 °C",
+        "Hist. do", "V4 °C", "EV",
     ]
     for c in cols_order:
         if c not in df_out.columns:
@@ -735,7 +746,25 @@ def run_simulation(
     _save_last_pull_cache(_LAST_PULL)
 
     log_str = "\n".join(logs) if logs else "✔ Dane pobrane bez błędów."
-    return log_str, df_out
+
+    # DODANE: jawna informacja o liczbie stacji/wierszy przy >1 stacji -
+    # patrz row_count_note w create_app(). Bez tego przy "Cały Region"/
+    # "Wybór miast" widać tylko tyle wierszy, ile mieści max_height tabeli
+    # (patrz komentarz przy gr.Dataframe) - reszta wymaga przewinięcia
+    # WEWNĄTRZ komponentu tabeli, co łatwo przeoczyć i wygląda jak "reszta
+    # miast się nie pokazała", mimo że backend (df_out) je zawiera - patrz
+    # weryfikacja bezpośrednim testem run_simulation() dla >1 miasta.
+    n_stations = len(nodes)
+    if n_stations > 1:
+        row_note = (
+            f"📊 **{n_stations} stacji, {len(df_out)} wierszy łącznie** "
+            f"({', '.join(nodes)}) — jeśli widzisz tylko pierwszą stację, "
+            f"przewiń tabelę **w dół wewnątrz niej samej** (nie stronę)."
+        )
+    else:
+        row_note = ""
+
+    return log_str, df_out, row_note
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -778,6 +807,14 @@ _CSS = """
            różną szerokość znaków 1 vs 8) i wyśrodkowanie w każdej komórce.
         */
         #forecast_table table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+        /* DODANE: 🔴🟠🟢/⚡ nie renderowały się w komórkach tabeli (puste/
+           "tofu" znaki) na niektórych systemach - domyślny stos fontów
+           motywu Gradio (Soft) nie zawiera fontu z glifami emoji, a bez
+           jawnego fallbacku przeglądarka nie zawsze sama podstawia font
+           systemowy dla pojedynczego znaku. Jawny fallback do fontów
+           emoji (Segoe UI Emoji na Windows, Apple Color Emoji na macOS,
+           Noto Color Emoji na Linux) wymusza poprawne renderowanie tych
+           konkretnych glifów, nie zmieniając wyglądu reszty tekstu. */
         #forecast_table table td, #forecast_table table th {
             white-space: nowrap !important;
             text-align: center !important;
@@ -785,6 +822,9 @@ _CSS = """
             font-size: 0.92rem;
             line-height: 1.3rem;
             border: 1px solid rgba(148, 163, 184, 0.18);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                Helvetica, Arial, sans-serif, "Apple Color Emoji",
+                "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
         }
         /* NAPRAWIONE: nagłówki ("Temp min [°C]", "Ciśnienie [hPa]" itd.)
            ucinały się do "Temp...", "Ciśnie..." - Gradio obcina nagłówek do
@@ -801,9 +841,10 @@ _CSS = """
         }
         #forecast_table table tr { height: 2.3rem; }
 
-        /* Znaczek 🔴🟠🟢 (korekta obciążenia) i ⚡EV/sygnały TIMDR mieszkają
+        /* Znaczek 🔴🟠🟢 (korekta obciążenia) i sygnały TIMDR mieszkają
            w kolumnie "Typ" (3. kolumna wg cols_order - Stacja, Data, Typ,
-           ...) razem z tekstem "Dziś"/"Jutro"/"+Nd" o różnej długości.
+           EV, ...) razem z tekstem "Dziś"/"Jutro"/"+Nd" o różnej długości.
+           ⚡EV ma teraz własną, 4. kolumnę - patrz DODANE przy column_widths.
            Wyśrodkowanie (domyślne dla reszty tabeli) rozjeżdżało kółka na
            boki - wyrównane do lewej trzymają się jednego miejsca w kolumnie,
            bliżej efektu "równo w szeregu". */
@@ -824,6 +865,20 @@ _CSS = """
         #cities_multi span, #cities_multi div {
             white-space: nowrap;
             text-overflow: ellipsis;
+        }
+
+        /* DODANE: "Uruchom prognozę" wyróżniony na zielono zamiast domyślnego
+           niebieskiego z motywu (_THEME = primary_hue="sky") - to jedyny
+           przycisk, który faktycznie odpala pobieranie/analizę, więc ma się
+           wizualnie odróżniać od reszty (w tym od "Wyczyść cache", który
+           zostaje w neutralnym stylu motywu). */
+        #run_btn {
+            background: #16a34a !important;
+            border-color: #15803d !important;
+            color: #ffffff !important;
+        }
+        #run_btn:hover {
+            background: #15803d !important;
         }
         """
 
@@ -899,14 +954,14 @@ def create_app():
                 # przycisk ma być bezpośrednio pod tym, co się właśnie
                 # ustawiło, a nie nad tym. Działanie (btn.click na dole
                 # pliku) nie zależy od kolejności renderowania w Blocks.
-                btn = gr.Button("▶ Uruchom prognozę", variant="primary", size="lg")
+                btn = gr.Button("▶ Uruchom prognozę", variant="primary", size="lg", elem_id="run_btn")
                 # DODANE: ręczne czyszczenie _last_pull_cache.json - pamięć
                 # ⚡EV (poprzedni pull per stacja/dzień) rosła bezterminowo i
                 # mogła zawierać stare wpisy z innych stacji/trybów/testów,
                 # które nie są już istotne (patrz clear_last_pull_cache()
                 # niżej). Nie czyści krakow_forecast_snapshots.csv (dane do
                 # bias_correction) - to osobny, celowo trwały plik.
-                clear_cache_btn = gr.Button("🔄 Wyczyść cache (EV)", size="sm")
+                clear_cache_btn = gr.Button("🔄 Wyczyść cache (⚡EV)", size="sm")
 
                 gr.Markdown("---")
 
@@ -971,6 +1026,17 @@ def create_app():
                         show_label=False,
                         placeholder="Tutaj pojawią się informacje o pobieraniu danych...",
                     )
+                # DODANE: krótka, ZAWSZE WIDOCZNA (nie w zwiniętym Dzienniku)
+                # informacja o liczbie stacji/wierszy przy wielu miastach.
+                # Powód: przy "Cały Region"/"Wybór miast" z >1 stacją tabela
+                # ma więcej wierszy niż mieści max_height (patrz niżej) - bez
+                # przewinięcia w dół widać tylko PIERWSZĄ stację i wygląda to
+                # jak "reszta się nie pokazała", mimo że backend poprawnie
+                # zwraca wszystkie (zweryfikowane bezpośrednim testem
+                # run_simulation() dla 2 i 3 wybranych miast - obie stacje/
+                # wszystkie trzy zawsze obecne w wyniku). Ten komunikat ma
+                # to jednoznacznie wyjaśnić bez konieczności zgadywania.
+                row_count_note = gr.Markdown("", elem_id="row_count_note")
                 # NAPRAWIONE: wrap=True + za wąskie kolumny ("Stacja"=120px,
                 # "Data"=95px) łamały "Krakow_Centrum"/"2026-08-16" do dwóch
                 # linii - różne wiersze wychodziły różnej wysokości ("skoki").
@@ -981,25 +1047,30 @@ def create_app():
                 # dla max. 14-dniowej prognozy pojedynczego miasta (14
                 # wierszy + nagłówek to ok. 550-600px przy obecnej wysokości
                 # wiersza 2.3rem z CSS #forecast_table). 700px mieści 14 dni
-                # bez scrolla; dla trybu "Cały Region" (więcej stacji × dni)
-                # nadal włączy się scroll wewnątrz komponentu - naturalne.
+                # bez scrolla; dla trybu "Cały Region"/"Wybór miast" (więcej
+                # stacji × dni) nadal włączy się scroll wewnątrz komponentu -
+                # stąd row_count_note wyżej, żeby to było jawnie wyjaśnione.
                 table = gr.Dataframe(
                     label="Prognoza wielodniowa",
                     elem_id="forecast_table",
                     wrap=False,
                     max_height=700,
-                    # "Typ" zwężony do 100px (znaczek 🔴/🟠/🟢 + "Dziś"/"Jutro"/
-                    # "+Nd" mieści się swobodnie). Rzadki przypadek pełnej
-                    # kombinacji "🟢 +13d ⚡ano·def·rez ⚡EV" (korekta + EV +
-                    # wszystkie sygnały TIMDR naraz) się przy tym utnie -
-                    # świadomy kompromis na rzecz węższej, gęstszej kolumny;
-                    # wrap=False + nowrap w CSS = ucina, nie łamie wiersza,
-                    # więc wysokość rzędów zostaje równa nawet w tym przypadku.
+                    # NAPRAWIONE: "Typ" przy 95px i tak ucinał się do "🔴 +7d …"
+                    # (screenshot użytkownika) - "⚡ano·def·rez" w ogóle się nie
+                    # mieściło mimo że EV zostało już wydzielone do osobnej
+                    # kolumny. 95px starczało tylko na znaczek + dzień, nie na
+                    # sygnały TIMDR obok. Poszerzone do 135px - mieści
+                    # najdłuższy realny przypadek "🔴 +13d ⚡ano·def·rez" bez
+                    # elipsy. ZMIENIONE: "EV" (60px, tylko "⚡EV" albo "–")
+                    # przeniesione z 4. pozycji (zaraz po "Typ") na sam koniec
+                    # wiersza, za "V4 °C" - patrz cols_order w run_simulation.
+                    # wrap=False + nowrap w CSS = ucina zamiast łamać wiersz,
+                    # więc wysokość rzędów zostaje równa.
                     column_widths=[
-                        "150px", "105px", "100px",
+                        "150px", "105px", "135px",
                         "95px", "95px", "95px",
                         "90px", "110px", "110px", "50px",
-                        "115px", "160px",
+                        "115px", "160px", "60px",
                     ],
                 )
 
@@ -1013,7 +1084,7 @@ def create_app():
         btn.click(
             fn=run_simulation,
             inputs=[mode, region, city, cities_multi, history_days, forecast_days, offline],
-            outputs=[logs_box, table],
+            outputs=[logs_box, table, row_count_note],
         )
 
         clear_cache_btn.click(
