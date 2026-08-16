@@ -106,9 +106,14 @@ POLISH_CITIES = sorted(list({
 }))
 
 # ── stałe Open-Meteo ────────────────────────────────────────────────────────
+# NAPRAWIONE: brak "winddirection_10m" tutaj był jedną z przyczyn tego, że
+# TIMDRAnalyzer.analyze(df_hist) rzucał KeyError('wind_dir') na KAŻDYM
+# wywołaniu przez cały ten sesyjny okres - patrz duży komentarz przy
+# run_simulation() (sekcja "── TIMDR"), gdzie opisana jest cała historia
+# tego błędu i jak został znaleziony.
 _OPEN_METEO_HOURLY = (
     "temperature_2m,precipitation,pressure_msl,windspeed_10m,"
-    "relativehumidity_2m"
+    "winddirection_10m,relativehumidity_2m"
 )
 _OPEN_METEO_FORECAST = (
     # NAPRAWIONE: bylo "surface_pressure" (cisnienie stacyjne, bez redukcji
@@ -188,9 +193,30 @@ def _fetch_historical(lat: float, lon: float, days_back: int) -> pd.DataFrame:
         "precip":      h["precipitation"],
         "pressure":    h["pressure_msl"],
         "wind":        h["windspeed_10m"],
+        "wind_dir":    h["winddirection_10m"],
         "humidity":    h["relativehumidity_2m"],
     }).set_index("time")
     return df
+
+
+def _adapt_for_timdr(df_hist: pd.DataFrame) -> pd.DataFrame:
+    """Dostosowuje df_hist (indeks czasowy, kolumna 'wind') do formatu, jakiego
+    oczekują TIMDRAnalyzer/WindAnalyzer (kolumna 'datetime', kolumna
+    'wind_speed') - to jest DOKŁADNIE format zwracany przez oryginalny
+    data/fetcher.py:WeatherFetcher.fetch_hourly(), dla którego te klasy
+    zostały napisane. _fetch_historical() (wyżej) to NIEZALEŻNA, równoległa
+    implementacja pobierania historii - ma inny schemat kolumn, i przez całą
+    tę sesję nikt tego nie zauważył, bo wywołanie analyzer.analyze(df_hist)
+    w run_simulation() było owinięte w "except Exception: pass" (patrz
+    historia w komentarzu przy tym wywołaniu) - efekt: TIMDRAnalyzer rzucał
+    KeyError('wind_dir') na KAŻDYM uruchomieniu, cicho połykany, więc cały
+    system sygnałów ⚡anomalia/defekt/rezonans nigdy faktycznie nie zadziałał
+    w GUI, mimo że wyglądało jakby "analiza po prostu nic nie znalazła"."""
+    out = df_hist.reset_index().rename(columns={
+        df_hist.index.name or "index": "datetime",
+        "wind": "wind_speed",
+    })
+    return out
 
 
 def _fetch_forecast(lat: float, lon: float, days_ahead: int) -> pd.DataFrame:
@@ -343,6 +369,27 @@ def _save_last_pull_cache(cache: dict[tuple[str, str], dict]) -> None:
 _LAST_PULL: dict[tuple[str, str], dict] = _load_last_pull_cache()
 
 
+def clear_last_pull_cache() -> str:
+    """Ręczne czyszczenie pamięci ⚡EV (nie dotyka krakow_forecast_snapshots.csv
+    ani bias_correction - to osobna, celowo trwała historia). Przydatne gdy
+    plik zebrał stare wpisy z innych stacji/trybów/testów, które nie są już
+    istotne - kolejny pull po czyszczeniu nie będzie miał z czym porównać,
+    więc ⚡EV zacznie znów działać dopiero od pulla PO NASTĘPNYM."""
+    _LAST_PULL.clear()
+    try:
+        if os.path.exists(_LAST_PULL_CACHE_PATH):
+            os.remove(_LAST_PULL_CACHE_PATH)
+        removed = True
+    except Exception:
+        removed = False
+    return (
+        "🔄 Cache EV (_last_pull_cache.json) wyczyszczony."
+        if removed else
+        "🔄 Pamięć EV wyczyszczona w procesie, ale nie udało się usunąć pliku na dysku "
+        "(sprawdź uprawnienia) - zostanie nadpisany przy następnym uruchomieniu."
+    )
+
+
 _BIAS_BADGE_SOLID_N = 15  # próg "solidnej" próbki - patrz _bias_badge() niżej
 
 
@@ -403,6 +450,7 @@ def run_simulation(
     mode: str,
     selected_region: str,
     selected_city: str,
+    selected_cities: list[str] | None,
     history_days: int,
     forecast_days: int,
     offline_demo: bool,
@@ -411,15 +459,29 @@ def run_simulation(
     logs: list[str] = []
     rows: list[dict] = []
 
-    nodes = (
-        [selected_city]
-        if mode == "Pojedyncze miasto"
-        else REGIONS_MAP.get(selected_region.lower(), REGIONS_MAP["poland_south"])
-    )
+    # DODANE: trzeci tryb "Wybór miast" - dowolna kombinacja miast z listy,
+    # nie ograniczona do sztywnego podziału na regiony w REGIONS_MAP (np.
+    # Kraków + Gdańsk + Warszawa naraz, bez wspólnego regionu). Pusty wybór
+    # (użytkownik odznaczył wszystko) -> fallback na Kraków, żeby przycisk
+    # "Uruchom" nigdy nie zwracał pustej tabeli bez wyjaśnienia dlaczego.
+    if mode == "Pojedyncze miasto":
+        nodes = [selected_city]
+    elif mode == "Wybór miast":
+        nodes = list(selected_cities) if selected_cities else ["Krakow_Centrum"]
+        if not selected_cities:
+            logs.append("⚠️  Nie wybrano żadnego miasta - użyto domyślnego (Krakow_Centrum).")
+    else:
+        nodes = REGIONS_MAP.get(selected_region.lower(), REGIONS_MAP["poland_south"])
+
+    if mode == "Pojedyncze miasto":
+        scope_label = "Miasto: " + selected_city
+    elif mode == "Wybór miast":
+        scope_label = "Miasta: " + ", ".join(nodes)
+    else:
+        scope_label = "Region: " + selected_region.upper()
 
     logs.append(
-        f"{'Miasto: ' + selected_city if mode == 'Pojedyncze miasto' else 'Region: ' + selected_region.upper()}"
-        f" | Historia: {history_days}d | Prognoza: {forecast_days}d | Stacji: {len(nodes)}"
+        f"{scope_label} | Historia: {history_days}d | Prognoza: {forecast_days}d | Stacji: {len(nodes)}"
     )
 
     engine = SynoptykFEngine(wavelet="db4") if _SF_OK else None
@@ -474,13 +536,24 @@ def run_simulation(
             logs.append(f"⚠️  {node}: błąd pobierania historii: {e}")
 
         # ── TIMDR (opcjonalnie) ─────────────────────────────────────────────
+        # NAPRAWIONE: analyzer.analyze(df_hist) rzucał KeyError('wind_dir')
+        # (potem, po dodaniu wind_dir, złapałby kolejno 'wind_speed' i
+        # 'datetime' - TIMDRAnalyzer/WindAnalyzer oczekują schematu kolumn
+        # z data/fetcher.py:WeatherFetcher, nie tego z _fetch_historical()
+        # powyżej) - patrz _adapt_for_timdr(). Błąd był NIEWIDOCZNY całą tę
+        # sesję, bo "except Exception: pass" cicho go łykał - kod tak samo
+        # "działał", tabela tak samo się wypełniała, tylko sygnały
+        # ⚡anomalia/defekt/rezonans nigdy się nie zapalały, bo w
+        # rzeczywistości analiza nigdy się nie wykonywała. Teraz błąd trafia
+        # do Dziennika zamiast znikać po cichu - żeby taki regres nie mógł
+        # się już ukryć bez śladu.
         timdr_results: dict = {}
         if _TIMDR_OK and df_hist is not None:
             try:
                 analyzer = TIMDRAnalyzer(station=node)
-                timdr_results = analyzer.analyze(df_hist)
-            except Exception:
-                pass
+                timdr_results = analyzer.analyze(_adapt_for_timdr(df_hist))
+            except Exception as e:
+                logs.append(f"⚠️  {node}: błąd analizy TIMDR (sygnały ⚡): {e}")
 
         # ── korekta falkowa bazowa temperatury ─────────────────────────────
         base_correction = 0.0
@@ -670,9 +743,13 @@ def run_simulation(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def update_visibility(mode: str):
+    """Zwraca widoczność dla (region, city, cities_multi) - w tej kolejności,
+    musi odpowiadać outputs=[region, city, cities_multi] w mode.change()."""
     if mode == "Pojedyncze miasto":
-        return gr.update(visible=False), gr.update(visible=True)
-    return gr.update(visible=True), gr.update(visible=False)
+        return gr.update(visible=False), gr.update(visible=True), gr.update(visible=False)
+    if mode == "Wybór miast":
+        return gr.update(visible=False), gr.update(visible=False), gr.update(visible=True)
+    return gr.update(visible=True), gr.update(visible=False), gr.update(visible=False)
 
 
 # NAPRAWIONE: theme/css jako moduł-poziomowe stałe, nie tylko lokalne w
@@ -735,6 +812,19 @@ _CSS = """
             text-align: left !important;
         }
         #forecast_table table td:nth-child(3) { padding-left: 12px !important; }
+
+        /* NAPRAWIONE: chipy z nazwami miast w "Miasta (wybór)" łamały się
+           w połowie słowa ("Krakow_Cen" / "trum") w wąskiej lewej kolumnie -
+           komponent przeniesiony do szerokiej prawej (patrz create_app()),
+           a to jako druga, niezależna warstwa zabezpieczenia (na wypadek
+           wąskiego okna przeglądarki): wymuszamy brak zawijania i elipsę
+           zamiast łamania w środku słowa na dowolnym elemencie tekstowym
+           wewnątrz komponentu, niezależnie od dokładnych nazw klas, które
+           Gradio generuje inaczej w różnych wersjach. */
+        #cities_multi span, #cities_multi div {
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
         """
 
 
@@ -763,23 +853,60 @@ def create_app():
             # (patrz skrócone etykiety niżej).
             with gr.Column(scale=1, min_width=190):
 
+                # ZMIENIONE: domyślny tryb startowy to teraz "Pojedyncze
+                # miasto" / Kraków, nie "Cały Region". Powód: "Cały Region"
+                # (7 stacji × do 14 dni = do 98 wierszy) w praktyce nie mieści
+                # się w max_height=700px tabeli - widać wtedy głównie tylko
+                # pierwszą stację (Kraków) plus kilka wierszy kolejnej, dopóki
+                # nie przewinie się w dół. To NIE jest błąd zwracania danych
+                # (zweryfikowane: backend faktycznie zwraca wszystkie stacje
+                # regionu, patrz test w historii sesji) - tylko efekt
+                # ograniczonej wysokości widoku. Start od pojedynczego miasta
+                # daje od razu kompletny, niewymagający scrolla widok.
+                # DODANE: trzeci tryb "Wybór miast" - dowolna kombinacja
+                # miast (nie ograniczona do sztywnych grup z REGIONS_MAP),
+                # np. Kraków + Gdańsk + Warszawa naraz.
                 mode = gr.Radio(
-                    choices=["Cały Region", "Pojedyncze miasto"],
-                    value="Cały Region",
+                    choices=["Cały Region", "Pojedyncze miasto", "Wybór miast"],
+                    value="Pojedyncze miasto",
                     label="Tryb",
                 )
                 region = gr.Dropdown(
                     choices=list(REGIONS_MAP.keys()),
                     value="poland_south",
                     label="Region",
-                    visible=True,
+                    visible=False,
                 )
                 city = gr.Dropdown(
                     choices=POLISH_CITIES,
                     value="Krakow_Centrum",
                     label="Miasto",
-                    visible=False,
+                    visible=True,
                 )
+                # NAPRAWIONE: "Miasta (wybór)" (multiselect) był tutaj, w
+                # wąskiej (190px) lewej kolumnie - nazwy miast w chipach
+                # zawijały się w połowie słowa ("Krakow_Cen" / "trum"),
+                # bo pojedynczy chip miał za mało miejsca. Przeniesiony do
+                # szerokiej prawej kolumny (patrz niżej, nad tabelą) - tam
+                # jest miejsce na pełne nazwy bez łamania. Widoczność nadal
+                # sterowana tym samym update_visibility(mode).
+
+                # ZMIENIONE: przycisk "Uruchom prognozę" przeniesiony spod
+                # samego dołu panelu (pierwsza poprawka) TERAZ pod sekcję
+                # wyboru trybu/miast (Tryb + Region/Miasto/Miasta), zamiast
+                # nad nią - bo wybór trybu (zwłaszcza "Wybór miast") dzieje
+                # się PRZED uruchomieniem i będzie używany najczęściej, więc
+                # przycisk ma być bezpośrednio pod tym, co się właśnie
+                # ustawiło, a nie nad tym. Działanie (btn.click na dole
+                # pliku) nie zależy od kolejności renderowania w Blocks.
+                btn = gr.Button("▶ Uruchom prognozę", variant="primary", size="lg")
+                # DODANE: ręczne czyszczenie _last_pull_cache.json - pamięć
+                # ⚡EV (poprzedni pull per stacja/dzień) rosła bezterminowo i
+                # mogła zawierać stare wpisy z innych stacji/trybów/testów,
+                # które nie są już istotne (patrz clear_last_pull_cache()
+                # niżej). Nie czyści krakow_forecast_snapshots.csv (dane do
+                # bias_correction) - to osobny, celowo trwały plik.
+                clear_cache_btn = gr.Button("🔄 Wyczyść cache (EV)", size="sm")
 
                 gr.Markdown("---")
 
@@ -818,10 +945,19 @@ def create_app():
                     elem_id="warn",
                 )
 
-                btn = gr.Button("▶ Uruchom prognozę", variant="primary", size="lg")
-
             # ── wyniki ────────────────────────────────────────────────────
             with gr.Column(scale=6):
+                # NAPRAWIONE: przeniesione z wąskiej lewej kolumny (patrz
+                # komentarz przy Miasto/Region wyżej) - tutaj chipy z nazwami
+                # miast mają dość miejsca, żeby nie łamać się w połowie słowa.
+                cities_multi = gr.Dropdown(
+                    choices=POLISH_CITIES,
+                    value=["Krakow_Centrum"],
+                    multiselect=True,
+                    label="Miasta (wybór) — tryb „Wybór miast”",
+                    visible=False,
+                    elem_id="cities_multi",
+                )
                 # NAPRAWIONE: "Dziennik" byl zwyklym, zawsze rozwinietym
                 # Textbox(lines=3) nad tabela - naglowek + pole zajmowaly
                 # zauwazalna czesc wysokosci prawej kolumny, kosztem tabeli
@@ -840,10 +976,18 @@ def create_app():
                 # linii - różne wiersze wychodziły różnej wysokości ("skoki").
                 # wrap=False + poszerzone Stacja/Data = jeden rząd = jedna
                 # linia, zawsze.
+                # NAPRAWIONE: domyślne max_height=500px pokazywało tylko
+                # ok. 2-3 wiersze przed wewnętrznym scrollem tabeli - za mało
+                # dla max. 14-dniowej prognozy pojedynczego miasta (14
+                # wierszy + nagłówek to ok. 550-600px przy obecnej wysokości
+                # wiersza 2.3rem z CSS #forecast_table). 700px mieści 14 dni
+                # bez scrolla; dla trybu "Cały Region" (więcej stacji × dni)
+                # nadal włączy się scroll wewnątrz komponentu - naturalne.
                 table = gr.Dataframe(
                     label="Prognoza wielodniowa",
                     elem_id="forecast_table",
                     wrap=False,
+                    max_height=700,
                     # "Typ" zwężony do 100px (znaczek 🔴/🟠/🟢 + "Dziś"/"Jutro"/
                     # "+Nd" mieści się swobodnie). Rzadki przypadek pełnej
                     # kombinacji "🟢 +13d ⚡ano·def·rez ⚡EV" (korekta + EV +
@@ -863,13 +1007,18 @@ def create_app():
         mode.change(
             fn=update_visibility,
             inputs=[mode],
-            outputs=[region, city],
+            outputs=[region, city, cities_multi],
         )
 
         btn.click(
             fn=run_simulation,
-            inputs=[mode, region, city, history_days, forecast_days, offline],
+            inputs=[mode, region, city, cities_multi, history_days, forecast_days, offline],
             outputs=[logs_box, table],
+        )
+
+        clear_cache_btn.click(
+            fn=clear_last_pull_cache,
+            outputs=[logs_box],
         )
 
     return demo
