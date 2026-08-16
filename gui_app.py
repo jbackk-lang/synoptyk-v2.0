@@ -373,14 +373,25 @@ def detect_engine_volatility(prev_row: dict, new_row: dict) -> dict:
     krakow_forecast_snapshots.csv (np. +4d..+9d o 2-5°C, opad jutra
     12.1mm→33.3mm w ciągu tej samej doby, przed wdrożeniem blendingu)."""
     flags = {}
-    if abs(prev_row["Temp śr [°C]"] - new_row["Temp śr [°C]"]) > 2.0:
-        flags["temp_jump"] = True
-    if abs(prev_row["Opady [mm]"] - new_row["Opady [mm]"]) > 10.0:
-        flags["precip_jump"] = True
-    if abs(prev_row["Ciśnienie [hPa]"] - new_row["Ciśnienie [hPa]"]) > 5.0:
-        flags["pressure_jump"] = True
-    if abs(prev_row["Wiatr max [km/h]"] - new_row["Wiatr max [km/h]"]) > 8.0:
-        flags["wind_jump"] = True
+    # .get() + _diff() zamiast bezpośredniego indeksowania: stary
+    # _last_pull_cache.json sprzed skrócenia nagłówków (patrz NAPRAWIONE przy
+    # column_widths niżej) miał inne klucze - brakujący klucz ma po prostu
+    # nie wywoływać skoku (nie crashować KeyError na pierwszym uruchomieniu
+    # po zmianie nazw).
+    def _diff(key: str) -> float | None:
+        a, b = prev_row.get(key), new_row.get(key)
+        return abs(a - b) if a is not None and b is not None else None
+
+    checks = [
+        ("Śr °C", 2.0, "temp_jump"),
+        ("Opad mm", 10.0, "precip_jump"),
+        ("Ciśn hPa", 5.0, "pressure_jump"),
+        ("Wiatr km/h", 8.0, "wind_jump"),
+    ]
+    for key, threshold, flag_name in checks:
+        d = _diff(key)
+        if d is not None and d > threshold:
+            flags[flag_name] = True
     return flags
 
 
@@ -443,9 +454,9 @@ def run_simulation(
                 day = today + timedelta(days=d)
                 rows.append({
                     "Stacja": node, "Data": str(day), "Typ": "DEMO",
-                    "Temp min [°C]": "–", "Temp śr [°C]": "–", "Temp max [°C]": "–",
-                    "Opady [mm]": "–", "Ciśnienie [hPa]": "–", "Wiatr max [km/h]": "–",
-                    "Kier.": "–", "Temp śr V4 [°C]": "–",
+                    "Min °C": "–", "Śr °C": "–", "Max °C": "–",
+                    "Opad mm": "–", "Ciśn hPa": "–", "Wiatr km/h": "–",
+                    "Kier.": "–", "V4 °C": "–",
                 })
             continue
 
@@ -540,11 +551,11 @@ def run_simulation(
                 # napis "Dziś / Jutro / +Nd"
                 delta = (day_label - date.today()).days
                 if delta == 0:
-                    typ = "Dziś"
+                    day_text = "Dziś"
                 elif delta == 1:
-                    typ = "Jutro"
+                    day_text = "Jutro"
                 else:
-                    typ = f"+{delta}d"
+                    day_text = f"+{delta}d"
 
                 # korekta UHI + lapse rate + falkowa
                 # NAPRAWIONE: zaokrąglamy CAŁĄ sumę (nie tylko base_correction),
@@ -579,9 +590,13 @@ def run_simulation(
                 # niżej po progi i uzasadnienie. Doklejany do KAŻDEGO dnia
                 # (nie tylko aktywnych), żeby czerwony "jeszcze niedostępne"
                 # było widoczne wprost, a nie domyślne przez brak znaczka.
+                # NAPRAWIONE: znaczek na PIERWSZYM miejscu, dzień docelowy po
+                # nim (nie odwrotnie) - kółka stoją w jednej kolumnie po
+                # lewej krawędzi komórki niezależnie od długości "Dziś" vs
+                # "+13d", więc łatwiej je od razu wyłapać wzrokiem w dół tabeli.
                 if day_idx in bias_table:
                     t_avg = apply_bias_correction(t_avg, day_idx, bias_table)
-                typ += " " + _bias_badge(day_idx, bias_table)
+                typ = f"{_bias_badge(day_idx, bias_table)} {day_text}"
 
                 # sygnały TIMDR → szersze pasmo (wyświetlane w polu Typ)
                 signals = [k for k in ("anomalia", "defekt", "rezonans") if timdr_results.get(k)]
@@ -590,8 +605,8 @@ def run_simulation(
 
                 # ── EV: skok głównego silnika względem poprzedniego pulla ──
                 current_vals = {
-                    "Temp śr [°C]": t_avg, "Opady [mm]": precip,
-                    "Ciśnienie [hPa]": press, "Wiatr max [km/h]": wind,
+                    "Śr °C": t_avg, "Opad mm": precip,
+                    "Ciśn hPa": press, "Wiatr km/h": wind,
                 }
                 pull_key = (node, str(day_label))
                 prev_vals = _LAST_PULL.get(pull_key)
@@ -608,18 +623,18 @@ def run_simulation(
                     v4_str = f"{v4_point} [{v4_lower}–{v4_upper}]"
 
                 rows.append({
-                    "Stacja":          node,
-                    "Data":            str(day_label),
-                    "Typ":             typ,
-                    "Temp min [°C]":   t_min,
-                    "Temp śr [°C]":    t_avg,
-                    "Temp max [°C]":   t_max,
-                    "Opady [mm]":      precip,
-                    "Ciśnienie [hPa]": press,
-                    "Wiatr max [km/h]":wind,
-                    "Kier.":           wind_arrow,
-                    "Dane hist. do":   data_end_str,
-                    "Temp śr V4 [°C]": v4_str,
+                    "Stacja":   node,
+                    "Data":     str(day_label),
+                    "Typ":      typ,
+                    "Min °C":   t_min,
+                    "Śr °C":    t_avg,
+                    "Max °C":   t_max,
+                    "Opad mm":  precip,
+                    "Ciśn hPa": press,
+                    "Wiatr km/h": wind,
+                    "Kier.":    wind_arrow,
+                    "Hist. do": data_end_str,
+                    "V4 °C":    v4_str,
                 })
 
         except Exception as e:
@@ -627,11 +642,17 @@ def run_simulation(
 
     df_out = pd.DataFrame(rows)
     # porządkowanie kolumn
+    # NAPRAWIONE: pełne nagłówki ("Temp min [°C]", "Ciśnienie [hPa]" itd.)
+    # ucinały się do "Temp...", "Ciśnie..." przy wąskich kolumnach - Gradio
+    # obcina nagłówek do szerokości kolumny niezależnie od wrap. Skrócone do
+    # jednostki + istotnego słowa (Min/Śr/Max °C, Opad mm, Ciśn hPa,
+    # Wiatr km/h, Hist. do, V4 °C) - to i tak jest oczywiste w kontekście
+    # tabeli prognozy, więc żadna informacja się nie gubi.
     cols_order = [
         "Stacja", "Data", "Typ",
-        "Temp min [°C]", "Temp śr [°C]", "Temp max [°C]",
-        "Opady [mm]", "Ciśnienie [hPa]", "Wiatr max [km/h]", "Kier.",
-        "Dane hist. do", "Temp śr V4 [°C]",
+        "Min °C", "Śr °C", "Max °C",
+        "Opad mm", "Ciśn hPa", "Wiatr km/h", "Kier.",
+        "Hist. do", "V4 °C",
     ]
     for c in cols_order:
         if c not in df_out.columns:
@@ -654,17 +675,74 @@ def update_visibility(mode: str):
     return gr.update(visible=True), gr.update(visible=False)
 
 
-def create_app():
-    theme = gr.themes.Soft(primary_hue="sky", neutral_hue="slate")
-
-    with gr.Blocks(
-        theme=theme,
-        title="Synoptyk-v2.0",
-        css="""
+# NAPRAWIONE: theme/css jako moduł-poziomowe stałe, nie tylko lokalne w
+# create_app() - Gradio >=6.0 PRZESTAŁO honorować theme/css przekazane do
+# konstruktora gr.Blocks() (tylko ostrzega UserWarning i po cichu je
+# pomija), trzeba je podać też w app.launch() na końcu pliku. Ponieważ
+# requirements.txt ma "gradio>=4.0.0" bez górnej granicy, świeży `pip
+# install` może ściągnąć 6.x i cały CSS (w tym #forecast_table wyżej -
+# patrz naprawa "skoków" w tabeli) po prostu by zniknął bez żadnego błędu.
+# Przekazanie w obu miejscach jest bezpieczne wstecznie - starsze Gradio
+# (4.x/5.x) też akceptuje theme/css w launch().
+_THEME = gr.themes.Soft(primary_hue="sky", neutral_hue="slate")
+_CSS = """
         #header { font-size: 1.3rem; font-weight: 700; color: #0ea5e9; }
         #warn   { color: #f59e0b; font-size: 0.85rem; }
         .label-text { font-weight: 600 !important; }
-        """,
+
+        /* NAPRAWIONE: "Stacja"/"Data" zawijały się do dwóch linii przy
+           domyślnych (za wąskich) szerokościach kolumn (wrap=True), co
+           dawało różną wysokość kolejnych wierszy - "skoki" w tabeli.
+           Teraz: wrap=False + wystarczająco szerokie kolumny (patrz
+           column_widths niżej), a to CSS wymusza jedną linię na komórkę
+           (na wypadek gdyby konkretna wersja Gradio i tak próbowała
+           zawijać) i wyrównuje wszystko do jednakowej, gęstej siatki -
+           stąd tabularne cyfry (żeby kolumny liczb nie "skakały" przez
+           różną szerokość znaków 1 vs 8) i wyśrodkowanie w każdej komórce.
+        */
+        #forecast_table table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+        #forecast_table table td, #forecast_table table th {
+            white-space: nowrap !important;
+            text-align: center !important;
+            padding: 7px 10px !important;
+            font-size: 0.92rem;
+            line-height: 1.3rem;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+        }
+        /* NAPRAWIONE: nagłówki ("Temp min [°C]", "Ciśnienie [hPa]" itd.)
+           ucinały się do "Temp...", "Ciśnie..." - Gradio obcina nagłówek do
+           szerokości kolumny bez wglądu w to, że treść jest dłuższa niż
+           dane pod spodem. Skrócone same etykiety (patrz cols_order w
+           run_simulation) ORAZ mniejsza czcionka nagłówka niż komórek
+           danych - dwie niezależne naprawy tego samego objawu, każda
+           zmniejsza ryzyko powrotu problemu przy kolejnej zmianie nazw.
+        */
+        #forecast_table table th {
+            font-weight: 700;
+            font-size: 0.78rem;
+            padding: 6px 8px !important;
+        }
+        #forecast_table table tr { height: 2.3rem; }
+
+        /* Znaczek 🔴🟠🟢 (korekta obciążenia) i ⚡EV/sygnały TIMDR mieszkają
+           w kolumnie "Typ" (3. kolumna wg cols_order - Stacja, Data, Typ,
+           ...) razem z tekstem "Dziś"/"Jutro"/"+Nd" o różnej długości.
+           Wyśrodkowanie (domyślne dla reszty tabeli) rozjeżdżało kółka na
+           boki - wyrównane do lewej trzymają się jednego miejsca w kolumnie,
+           bliżej efektu "równo w szeregu". */
+        #forecast_table table td:nth-child(3),
+        #forecast_table table th:nth-child(3) {
+            text-align: left !important;
+        }
+        #forecast_table table td:nth-child(3) { padding-left: 12px !important; }
+        """
+
+
+def create_app():
+    with gr.Blocks(
+        theme=_THEME,
+        title="Synoptyk-v2.0",
+        css=_CSS,
     ) as demo:
 
         gr.Markdown(
@@ -679,7 +757,11 @@ def create_app():
             # szerokosci) - zmniejszone do wezszej proporcji, zeby wiecej
             # miejsca zostalo dla tabeli prognozy (teraz i tak szerszej,
             # bo doszly kolumny "Kier." i "Temp śr V4").
-            with gr.Column(scale=1, min_width=220):
+            # NAPRAWIONE (2): dalsze zwezenie (min_width 220->190,
+            # scale prawej 6->8) - lewe menu miało zbyt dużo pustego
+            # miejsca i długie etykiety suwaków zawijały się do 3 linii
+            # (patrz skrócone etykiety niżej).
+            with gr.Column(scale=1, min_width=190):
 
                 mode = gr.Radio(
                     choices=["Cały Region", "Pojedyncze miasto"],
@@ -701,19 +783,24 @@ def create_app():
 
                 gr.Markdown("---")
 
+                # NAPRAWIONE: pełne etykiety ("Historia (dni) — okno filtra
+                # falkowego") zawijały się do 2-3 linii w wąskiej kolumnie,
+                # rozjeżdżając panel - skrócone, pełne wyjaśnienie zostaje
+                # w bloku ℹ️ niżej.
                 history_days = gr.Slider(
                     minimum=3, maximum=30, value=7, step=1,
-                    label="Historia (dni) — okno filtra falkowego",
+                    label="Historia (dni)",
                 )
                 forecast_days = gr.Slider(
                     minimum=1, maximum=14, value=7, step=1,
-                    label="Prognoza (dni naprzód)",
+                    label="Prognoza (dni)",
                 )
                 offline = gr.Checkbox(value=False, label="Tryb Demo (offline)")
 
                 gr.Markdown(
-                    "ℹ️ Prognoza pochodzi z Open-Meteo Forecast API. "
-                    "Korekta UHI i filtr falkowy (db4) są stosowane na temperaturze. "
+                    "ℹ️ „Historia (dni)” = okno danych wejściowych do filtra "
+                    "falkowego (db4) i korekty UHI, stosowanych na temperaturze. "
+                    "Prognoza pochodzi z Open-Meteo Forecast API. "
                     "Kolumna „Temp śr V4” to niezależny, eksperymentalny silnik "
                     "(SynoptykV4 — ekstrapolacja trendu z rzeczywistej historii, "
                     "bez modelu Open-Meteo) pokazywany obok do porównania.",
@@ -748,14 +835,27 @@ def create_app():
                         show_label=False,
                         placeholder="Tutaj pojawią się informacje o pobieraniu danych...",
                     )
+                # NAPRAWIONE: wrap=True + za wąskie kolumny ("Stacja"=120px,
+                # "Data"=95px) łamały "Krakow_Centrum"/"2026-08-16" do dwóch
+                # linii - różne wiersze wychodziły różnej wysokości ("skoki").
+                # wrap=False + poszerzone Stacja/Data = jeden rząd = jedna
+                # linia, zawsze.
                 table = gr.Dataframe(
                     label="Prognoza wielodniowa",
-                    wrap=True,
+                    elem_id="forecast_table",
+                    wrap=False,
+                    # "Typ" zwężony do 100px (znaczek 🔴/🟠/🟢 + "Dziś"/"Jutro"/
+                    # "+Nd" mieści się swobodnie). Rzadki przypadek pełnej
+                    # kombinacji "🟢 +13d ⚡ano·def·rez ⚡EV" (korekta + EV +
+                    # wszystkie sygnały TIMDR naraz) się przy tym utnie -
+                    # świadomy kompromis na rzecz węższej, gęstszej kolumny;
+                    # wrap=False + nowrap w CSS = ucina, nie łamie wiersza,
+                    # więc wysokość rzędów zostaje równa nawet w tym przypadku.
                     column_widths=[
-                        "120px", "95px", "75px",
-                        "100px", "100px", "100px",
-                        "90px", "110px", "110px", "45px",
-                        "105px", "150px",
+                        "150px", "105px", "100px",
+                        "95px", "95px", "95px",
+                        "90px", "110px", "110px", "50px",
+                        "115px", "160px",
                     ],
                 )
 
@@ -777,4 +877,11 @@ def create_app():
 
 if __name__ == "__main__":
     app = create_app()
-    app.launch(server_name="127.0.0.1", server_port=7860)
+    # theme/css podane też tutaj (patrz komentarz przy _THEME/_CSS wyżej) -
+    # try/except na wypadek starszego Gradio, gdzie launch() mógłby nie
+    # przyjmować tych kwargs (wtedy i tak działają przez gr.Blocks() w
+    # create_app(), więc fallback nic nie traci poza podwójnym ustawieniem).
+    try:
+        app.launch(server_name="127.0.0.1", server_port=7860, theme=_THEME, css=_CSS)
+    except TypeError:
+        app.launch(server_name="127.0.0.1", server_port=7860)
