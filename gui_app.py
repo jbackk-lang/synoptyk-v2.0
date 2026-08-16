@@ -13,6 +13,11 @@ Zmiany względem oryginału:
     samo potrafi mocno zmieniać prognozę między pobraniami tego samego dnia
     na tym horyzoncie (przelicza swój model NWP kilka razy dziennie) -
     patrz _blend_weight()/_own_trend_points() niżej
+  • DODANE: korekta obciążenia (bias correction) temp. średniej, licząca
+    się na żywo z historii krakow_forecast_snapshots.csv per lead_days -
+    "uczy się" własnych błędów bez osobnego kroku treningowego, kod sam
+    raportuje w Dzienniku dla ilu lead_days ma wystarczająco próbek (próg
+    5) - patrz forecaster/bias_correction.py
 """
 
 from __future__ import annotations
@@ -62,6 +67,18 @@ try:
     _V4_OK = True
 except Exception:
     _V4_OK = False
+
+try:
+    from forecaster.bias_correction import compute_lead_bias, apply_bias_correction
+    _BIAS_OK = True
+except Exception:
+    _BIAS_OK = False
+
+# Ścieżka do CSV, z którego bias_correction liczy tabelę na żywo przy
+# każdym uruchomieniu - patrz forecaster/bias_correction.py po pełne
+# uzasadnienie (min_samples=5 domyślnie: brak korekty dopóki dla danego
+# lead_days nie ma co najmniej 5 sparowanych obserwacji prognoza/realność).
+_SNAPSHOTS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "krakow_forecast_snapshots.csv")
 
 # ── regiony ────────────────────────────────────────────────────────────────
 REGIONS_MAP: dict[str, list[str]] = {
@@ -291,6 +308,31 @@ def _blend_weight(lead_days: int) -> float:
     return max(0.0, min(1.0, (lead_days - 2) / 8.0))
 
 
+# Pamięć ostatniego pulla per (stacja, data docelowa) — w procesie GUI,
+# resetuje się przy restarcie appki. Celowo najprostsza możliwa forma
+# (dict w pamięci), bo problem do rozwiązania jest jeden: wykryć skok
+# między dwoma kolejnymi uruchomieniami tego samego dnia dla tego samego
+# dnia docelowego, nie budować pełnej historii.
+_LAST_PULL: dict[tuple[str, str], dict] = {}
+
+
+def detect_engine_volatility(prev_row: dict, new_row: dict) -> dict:
+    """Wykrywa skok głównego silnika między poprzednim a bieżącym pullem dla
+    tego samego dnia docelowego. Progi dobrane pod skoki widziane w
+    krakow_forecast_snapshots.csv (np. +4d..+9d o 2-5°C, opad jutra
+    12.1mm→33.3mm w ciągu tej samej doby, przed wdrożeniem blendingu)."""
+    flags = {}
+    if abs(prev_row["Temp śr [°C]"] - new_row["Temp śr [°C]"]) > 2.0:
+        flags["temp_jump"] = True
+    if abs(prev_row["Opady [mm]"] - new_row["Opady [mm]"]) > 10.0:
+        flags["precip_jump"] = True
+    if abs(prev_row["Ciśnienie [hPa]"] - new_row["Ciśnienie [hPa]"]) > 5.0:
+        flags["pressure_jump"] = True
+    if abs(prev_row["Wiatr max [km/h]"] - new_row["Wiatr max [km/h]"]) > 8.0:
+        flags["wind_jump"] = True
+    return flags
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # główna funkcja backendu
 # ══════════════════════════════════════════════════════════════════════════════
@@ -325,6 +367,24 @@ def run_simulation(
         meta = get_node_metadata(node)
         uhi   = meta.get("uhi_factor", 1.0)
         alt   = meta.get("altitude", 150)
+
+        # ── korekta obciążenia (self-learning z historii CSV) ───────────────
+        # Patrz forecaster/bias_correction.py: NIE jest to model ML, tylko
+        # sredni blad prognoza-vs-rzeczywistosc liczony na zywo per lead_days.
+        # Kod SAM raportuje, dla ilu lead_days ma wystarczajaco probek -
+        # zeby bylo widac w Dzienniku, czy korekta w ogole dziala, a nie
+        # zeby cicho cos poprawiala bez informacji z ilu danych to wynika.
+        bias_table: dict = {}
+        if _BIAS_OK:
+            bias_table = compute_lead_bias(_SNAPSHOTS_CSV, station=node, min_samples=5)
+            if bias_table:
+                summary = ", ".join(
+                    f"+{lead}d(n={e['n']},{e['bias']:+.1f}°C)"
+                    for lead, e in sorted(bias_table.items())
+                )
+                logs.append(f"🎯 {node}: korekta obciążenia aktywna dla: {summary}")
+            else:
+                logs.append(f"🎯 {node}: korekta obciążenia jeszcze nieaktywna (za mało sparowanych pulli w CSV, próg 5/lead_days)")
 
         if offline_demo:
             today = date.today()
@@ -463,10 +523,26 @@ def run_simulation(
                     if own_wind is not None and day_idx < len(own_wind):
                         wind = round((1 - w) * wind + w * float(own_wind[day_idx]), 1)
 
+                # ── korekta obciążenia z historii (patrz log wyżej) ────────
+                if day_idx in bias_table:
+                    t_avg = apply_bias_correction(t_avg, day_idx, bias_table)
+                    typ += " 🎯"
+
                 # sygnały TIMDR → szersze pasmo (wyświetlane w polu Typ)
                 signals = [k for k in ("anomalia", "defekt", "rezonans") if timdr_results.get(k)]
                 if signals:
                     typ += f" ⚡{'·'.join(s[:3] for s in signals)}"
+
+                # ── EV: skok głównego silnika względem poprzedniego pulla ──
+                current_vals = {
+                    "Temp śr [°C]": t_avg, "Opady [mm]": precip,
+                    "Ciśnienie [hPa]": press, "Wiatr max [km/h]": wind,
+                }
+                pull_key = (node, str(day_label))
+                prev_vals = _LAST_PULL.get(pull_key)
+                if prev_vals is not None and detect_engine_volatility(prev_vals, current_vals):
+                    typ += " ⚡EV"
+                _LAST_PULL[pull_key] = current_vals
 
                 # SynoptykV4 - rownolegly punkt + pasmo (patrz komentarz wyzej)
                 v4_str = "–"
