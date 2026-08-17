@@ -686,12 +686,33 @@ def run_simulation(
                 current_vals = {
                     "Śr °C": t_avg, "Opad mm": precip,
                     "Ciśn hPa": press, "Wiatr km/h": wind,
+                    # DODANE: Min/Max dołączone tylko do porównania "co się
+                    # zmieniło" (niżej) - detect_engine_volatility() czyta
+                    # jawnie nazwane klucze (patrz jej definicja), więc te
+                    # dwa dodatkowe nie wpływają na progi/logikę EV.
+                    "Min °C": t_min, "Max °C": t_max,
                 }
                 pull_key = (node, str(day_label))
                 prev_vals = _LAST_PULL.get(pull_key)
                 ev_flag = "⚡EV" if (
                     prev_vals is not None and detect_engine_volatility(prev_vals, current_vals)
                 ) else "–"
+
+                # DODANE: wizualne odróżnienie "faktycznie nowa wartość w tym
+                # pullu" od "identyczna jak poprzednio" - użytkownik zgłosił,
+                # że kilka pulli z rzędu (nawet po restarcie serwera) dało
+                # bajt-identyczne wyniki i za każdym razem musiał wklejać tu,
+                # żeby to sprawdzić. Zamiast tego: wartość, która zmieniła
+                # się względem _LAST_PULL dla tego (stacja, dzień), dostaje
+                # kolor; niezmieniona zostaje zwykłym tekstem ("mocno biała"
+                # z perspektywy użytkownika - czyli po prostu bez wyróżnienia).
+                # Pierwszy pull dla danego dnia (brak wpisu w cache) liczy się
+                # jako "zmienione" - nie ma z czym porównać.
+                def _mark(key: str, value) -> str:
+                    changed = prev_vals is None or prev_vals.get(key) != current_vals.get(key)
+                    s = str(value)
+                    return f'<span class="val-changed">{s}</span>' if changed else s
+
                 _LAST_PULL[pull_key] = current_vals
 
                 # SynoptykV4 - rownolegly punkt + pasmo (patrz komentarz wyzej)
@@ -707,12 +728,12 @@ def run_simulation(
                     "Data":     str(day_label),
                     "Typ":      typ,
                     "EV":       ev_flag,
-                    "Min °C":   t_min,
-                    "Śr °C":    t_avg,
-                    "Max °C":   t_max,
-                    "Opad mm":  precip,
-                    "Ciśn hPa": press,
-                    "Wiatr km/h": wind,
+                    "Min °C":   _mark("Min °C", t_min),
+                    "Śr °C":    _mark("Śr °C", t_avg),
+                    "Max °C":   _mark("Max °C", t_max),
+                    "Opad mm":  _mark("Opad mm", precip),
+                    "Ciśn hPa": _mark("Ciśn hPa", press),
+                    "Wiatr km/h": _mark("Wiatr km/h", wind),
                     "Kier.":    wind_arrow,
                     "Hist. do": data_end_str,
                     "V4 °C":    v4_str,
@@ -854,6 +875,17 @@ _CSS = """
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
                 Helvetica, Arial, sans-serif, "Apple Color Emoji",
                 "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+        }
+        /* DODANE: "markdown" datatype w komórkach liczbowych (patrz
+           gr.Dataframe/_mark() w run_simulation) domyślnie owija treść w
+           <p> z marginesem - zerowane, żeby wiersze nie "podskakiwały"
+           wysokością względem zwykłych kolumn tekstowych. .val-changed =
+           wartość inna niż w poprzednim pullu dla tego dnia/stacji -
+           niezmieniona zostaje zwykłym tekstem bez wyróżnienia. */
+        #forecast_table table td p { margin: 0; }
+        #forecast_table table td .val-changed {
+            color: #2563eb;
+            font-weight: 700;
         }
         /* NAPRAWIONE: nagłówki ("Temp min [°C]", "Ciśnienie [hPa]" itd.)
            ucinały się do "Temp...", "Ciśnie..." - Gradio obcina nagłówek do
@@ -1105,6 +1137,21 @@ def create_app():
                     elem_id="forecast_table",
                     wrap=False,
                     max_height=1300,
+                    # DODANE: 6 kolumn liczbowych renderowane jako "markdown"
+                    # (przepuszcza surowy <span>) zamiast domyślnego "str" -
+                    # potrzebne, żeby _mark() w run_simulation() mogło
+                    # pokolorować wartości, które faktycznie zmieniły się
+                    # względem poprzedniego pulla dla tego dnia/stacji
+                    # (patrz komentarz "DODANE: wizualne odróżnienie..." przy
+                    # current_vals). Kolejność MUSI odpowiadać cols_order
+                    # niżej: Stacja, Data, Typ, Min, Śr, Max, Opad, Ciśn,
+                    # Wiatr, Kier., Hist. do, V4 °C, EV.
+                    datatype=[
+                        "str", "str", "str",
+                        "markdown", "markdown", "markdown",
+                        "markdown", "markdown", "markdown", "str",
+                        "str", "str", "str",
+                    ],
                     # NAPRAWIONE: "Typ" przy 95px i tak ucinał się do "🔴 +7d …"
                     # (screenshot użytkownika) - "⚡ano·def·rez" w ogóle się nie
                     # mieściło mimo że EV zostało już wydzielone do osobnej
