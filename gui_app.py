@@ -747,19 +747,29 @@ def run_simulation(
 
     log_str = "\n".join(logs) if logs else "✔ Dane pobrane bez błędów."
 
-    # DODANE: jawna informacja o liczbie stacji/wierszy przy >1 stacji -
-    # patrz row_count_note w create_app(). Bez tego przy "Cały Region"/
-    # "Wybór miast" widać tylko tyle wierszy, ile mieści max_height tabeli
-    # (patrz komentarz przy gr.Dataframe) - reszta wymaga przewinięcia
-    # WEWNĄTRZ komponentu tabeli, co łatwo przeoczyć i wygląda jak "reszta
-    # miast się nie pokazała", mimo że backend (df_out) je zawiera - patrz
-    # weryfikacja bezpośrednim testem run_simulation() dla >1 miasta.
+    # NAPRAWIONE: pierwotnie ten komunikat pokazywał się tylko przy >1
+    # stacji - ale zrzut ekranu użytkownika pokazał ten sam efekt też dla
+    # POJEDYNCZEGO miasta przy 14-dniowej prognozie (7 wierszy widocznych
+    # z 14 - Prognoza (dni)=14 potwierdzone w Dzienniku, więc backend
+    # policzył poprawnie, tylko tabela mieściła na oko ok. 7 wierszy zanim
+    # trzeba było przewinąć WEWNĄTRZ komponentu). max_height podniesione do
+    # 1300px (patrz gr.Dataframe niżej), więc 14 dni jednej stacji powinno
+    # się teraz mieścić bez przewijania - próg podniesiony do 16, żeby
+    # komunikat pokazywał się głównie tam, gdzie faktycznie jest potrzebny
+    # (Cały Region/Wybór miast z wieloma stacjami), nie przy zwykłym
+    # pojedynczym mieście.
+    _VISIBLE_ROWS_APPROX = 16
     n_stations = len(nodes)
-    if n_stations > 1:
+    if len(df_out) > _VISIBLE_ROWS_APPROX:
+        if n_stations > 1:
+            co = f"{n_stations} stacji ({', '.join(nodes)})"
+        else:
+            co = f"{forecast_days} dni prognozy dla {nodes[0]}"
         row_note = (
-            f"📊 **{n_stations} stacji, {len(df_out)} wierszy łącznie** "
-            f"({', '.join(nodes)}) — jeśli widzisz tylko pierwszą stację, "
-            f"przewiń tabelę **w dół wewnątrz niej samej** (nie stronę)."
+            f"📊 **{co}, {len(df_out)} wierszy łącznie** — widoczna jest "
+            f"tylko część (tabela mieści ok. {_VISIBLE_ROWS_APPROX} wierszy "
+            f"na raz). Przewiń tabelę **w dół wewnątrz niej samej** (nie "
+            f"stronę), żeby zobaczyć resztę."
         )
     else:
         row_note = ""
@@ -806,7 +816,26 @@ _CSS = """
            stąd tabularne cyfry (żeby kolumny liczb nie "skakały" przez
            różną szerokość znaków 1 vs 8) i wyśrodkowanie w każdej komórce.
         */
-        #forecast_table table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+        /* NAPRAWIONE: "border-collapse: collapse" na <table> potrafi cicho
+           psuć "position: sticky" na nagłówku (znany konflikt CSS) - Gradio
+           renderuje przewijaną tabelę właśnie przez sticky header + scroll
+           na kontenerze. Efekt zgłoszony przez użytkownika: przy wyniku
+           dłuższym niż mieści się na ekranie (>7 wierszy) w ogóle nie było
+           widać suwaka/scrollbara - wyglądało jak "wynik się nie
+           zaktualizował", a naprawdę dodatkowe wiersze były w DOM, tylko
+           kontener nie dawał się przewinąć. "border-spacing: 0" + "separate"
+           daje wizualnie ten sam efekt (brak przerw między komórkami) bez
+           łamania sticky/scroll. Jawne overflow-y na wypadek gdyby motyw
+           Gradio go nie ustawiał sam mimo max_height w komponencie. */
+        #forecast_table table {
+            border-collapse: separate;
+            border-spacing: 0;
+            font-variant-numeric: tabular-nums;
+        }
+        #forecast_table > div {
+            overflow-y: auto !important;
+            overflow-x: auto !important;
+        }
         /* DODANE: 🔴🟠🟢/⚡ nie renderowały się w komórkach tabeli (puste/
            "tofu" znaki) na niektórych systemach - domyślny stos fontów
            motywu Gradio (Soft) nie zawiera fontu z glifami emoji, a bez
@@ -990,13 +1019,30 @@ def create_app():
                 )
 
                 gr.Markdown(
-                    "**Znaczek przy dacie (Typ) — korekta obciążenia:**\n"
-                    "🟢 aktywna, solidna próbka (≥15 sparowanych pulli) · "
-                    "🟠 aktywna, mała próbka (uwaga, orientacyjna) · "
-                    "🔴 jeszcze niedostępna (za mało danych w historii)\n\n"
+                    "**Znaczek przy dacie (Typ) — korekta obciążenia:**\n\n"
+                    # ZMIENIONE: kółka opisów były w jednej linii oddzielone
+                    # "·" - zawijały się nieregularnie w wąskiej kolumnie,
+                    # trudno było skojarzyć kolor z opisem na pierwszy rzut
+                    # oka. Lista (jeden znaczek na linię) zamiast płynącego
+                    # tekstu.
+                    "- 🟢 aktywna, solidna próbka (≥15 sparowanych pulli)\n"
+                    "- 🟠 aktywna, mała próbka (uwaga, orientacyjna)\n"
+                    "- 🔴 jeszcze niedostępna (za mało danych w historii)\n\n"
                     "Dodatkowo: `⚡EV` = wykryty skok głównego silnika względem "
                     "poprzedniego uruchomienia; `⚡anomalia/defekt/rezonans` = "
-                    "aktywny sygnał TIMDR.",
+                    "aktywny sygnał TIMDR.\n\n"
+                    # NAPRAWIONE: pomyłka w poprzedniej wersji tej notatki -
+                    # chodziło o SUWAK PRZEWIJANIA SAMEJ TABELI (scrollbar
+                    # kontenera wyników), nie o suwaki "Historia"/"Prognoza"
+                    # w tym panelu. Odświeżanie tabeli jest teraz opisane
+                    # jako jej własny scrollbar, patrz naprawa "border-
+                    # collapse: separate" wyżej w kodzie, dzięki której
+                    # przewijanie w ogóle działa.
+                    "📊 Tabela wyników ma **własny suwak przewijania** "
+                    "(w pionie i w poziomie) — jeśli wynik jest dłuższy lub "
+                    "szerszy niż widoczny obszar, przewiń **wewnątrz samej "
+                    "tabeli**, żeby zobaczyć resztę wierszy/kolumn. Widok "
+                    "się przy tym odświeży poprawnie.",
                     elem_id="warn",
                 )
 
@@ -1043,31 +1089,38 @@ def create_app():
                 # wrap=False + poszerzone Stacja/Data = jeden rząd = jedna
                 # linia, zawsze.
                 # NAPRAWIONE: domyślne max_height=500px pokazywało tylko
-                # ok. 2-3 wiersze przed wewnętrznym scrollem tabeli - za mało
-                # dla max. 14-dniowej prognozy pojedynczego miasta (14
-                # wierszy + nagłówek to ok. 550-600px przy obecnej wysokości
-                # wiersza 2.3rem z CSS #forecast_table). 700px mieści 14 dni
-                # bez scrolla; dla trybu "Cały Region"/"Wybór miast" (więcej
-                # stacji × dni) nadal włączy się scroll wewnątrz komponentu -
-                # stąd row_count_note wyżej, żeby to było jawnie wyjaśnione.
+                # ok. 2-3 wiersze, 700px w praktyce (zrzut użytkownika) tylko
+                # ok. 7 - realna wysokość wiersza w przeglądarce wyszła
+                # znacznie większa niż wyliczona z CSS (2.3rem), więc czysto
+                # teoretyczne wyliczenie nie sprawdziło się. Zamiast dalej
+                # zgadywać - poszerzone hojnie do 1300px, żeby 14-dniowa
+                # prognoza pojedynczego miasta mieściła się praktycznie bez
+                # scrolla nawet przy większej realnej wysokości wiersza.
+                # Gradio Dataframe ma też WŁASNY przycisk pełnego ekranu
+                # (ikona ⛶ obok etykiety "Prognoza wielodniowa") - dla
+                # trybu "Cały Region"/"Wybór miast" (więcej niż ~30 wierszy)
+                # to i tak wygodniejsze niż jakikolwiek stały max_height.
                 table = gr.Dataframe(
                     label="Prognoza wielodniowa",
                     elem_id="forecast_table",
                     wrap=False,
-                    max_height=700,
+                    max_height=1300,
                     # NAPRAWIONE: "Typ" przy 95px i tak ucinał się do "🔴 +7d …"
                     # (screenshot użytkownika) - "⚡ano·def·rez" w ogóle się nie
                     # mieściło mimo że EV zostało już wydzielone do osobnej
-                    # kolumny. 95px starczało tylko na znaczek + dzień, nie na
-                    # sygnały TIMDR obok. Poszerzone do 135px - mieści
-                    # najdłuższy realny przypadek "🔴 +13d ⚡ano·def·rez" bez
-                    # elipsy. ZMIENIONE: "EV" (60px, tylko "⚡EV" albo "–")
-                    # przeniesione z 4. pozycji (zaraz po "Typ") na sam koniec
-                    # wiersza, za "V4 °C" - patrz cols_order w run_simulation.
-                    # wrap=False + nowrap w CSS = ucina zamiast łamać wiersz,
-                    # więc wysokość rzędów zostaje równa.
+                    # kolumny. Pierwsza poprawka (135px) OKAZAŁA SIĘ WCIĄŻ ZA
+                    # WĄSKA na kolejnym screenshocie ("🔴 Dziś ⚡ an…") - emoji
+                    # w praktyce zajmują więcej miejsca niż zwykłe znaki, a
+                    # padding (10px x2) zjada dodatkowe 20px. Poszerzone do
+                    # 180px - z zapasem mieści najdłuższy realny przypadek
+                    # "🔴 +13d ⚡ano·def·rez" bez elipsy. ZMIENIONE: "EV" (60px,
+                    # tylko "⚡EV" albo "–") przeniesione z 4. pozycji (zaraz
+                    # po "Typ") na sam koniec wiersza, za "V4 °C" - patrz
+                    # cols_order w run_simulation. wrap=False + nowrap w CSS =
+                    # ucina zamiast łamać wiersz, więc wysokość rzędów
+                    # zostaje równa.
                     column_widths=[
-                        "150px", "105px", "135px",
+                        "150px", "105px", "180px",
                         "95px", "95px", "95px",
                         "90px", "110px", "110px", "50px",
                         "115px", "160px", "60px",
@@ -1097,6 +1150,20 @@ def create_app():
 
 if __name__ == "__main__":
     app = create_app()
+    # DODANE: .queue() - bez niej Gradio Blocks obsługuje kliknięcie
+    # "Uruchom prognozę" jako zwykły, pojedynczy request/response przez
+    # HTTP. run_simulation() robi żywe zapytania sieciowe (Open-Meteo -
+    # do 2 na stację x do kilkunastu stacji w trybie "Cały Region"/"Wybór
+    # miast") i potrafi trwać kilka-kilkanaście sekund. To dokładnie
+    # scenariusz zgłaszany jako "zmieniłem suwak/wybór miast, kliknąłem
+    # Uruchom, tabela się nie zmienia" - bez kolejki (WebSocket zamiast
+    # gołego requestu) dłuższe wywołania są bardziej podatne na to, że
+    # odpowiedź nie zostanie poprawnie powiązana z UI po stronie
+    # przeglądarki, mimo że backend policzył wynik poprawnie. .queue() to
+    # standardowa, zalecana przez dokumentację Gradio poprawka dla funkcji
+    # trwających dłużej niż ułamek sekundy - nie zmienia niczego w samej
+    # logice run_simulation(), tylko sposób komunikacji z przeglądarką.
+    app.queue()
     # theme/css podane też tutaj (patrz komentarz przy _THEME/_CSS wyżej) -
     # try/except na wypadek starszego Gradio, gdzie launch() mógłby nie
     # przyjmować tych kwargs (wtedy i tak działają przez gr.Blocks() w
