@@ -115,6 +115,8 @@ Tabela wyników zawiera kolumny: `Stacja`, `Data`, `Typ` (Dziś/Jutro/+Nd), `EV`
 
 **Korekta obciążenia** (`forecaster/bias_correction.py`, `apply_bias_correction()`): średni zmierzony błąd (rzeczywistość − prognoza) per `lead_days`, liczony na żywo z `krakow_forecast_snapshots.csv` przy każdym uruchomieniu. To NIE jest model ML — nie ma osobnego kroku treningowego, korekta po prostu "uczy się" w miarę przybywania sparowanych obserwacji w CSV.
 
+**DODANE — porównanie trafności głównego toru i V4 z rzeczywistością**: `krakow_forecast_snapshots.csv` ma teraz dodatkowe kolumny `v4_point_c`/`v4_lower_c`/`v4_upper_c` (punkt + pasmo `SynoptykV4.forecast()`, zapisywane od danej daty pulla w górę — starsze wiersze mają je puste). `compute_lead_bias()` przyjmuje opcjonalny `forecast_col` (domyślnie `"avg_temp_c"` - główny tor); wywołanie z `forecast_col="v4_point_c"` liczy dokładnie te same statystyki (bias/MAE per `lead_days`) dla samodzielnego toru V4. Dopóki nie ma realnych obserwacji sparowanych z wierszami po dodaniu tych kolumn, zwraca pusty słownik (brak danych, nie zero) — zacznie się wypełniać w miarę przybywania kolejnych `IMGW_real_*`/`web_szukaj_*` w CSV dla dat od 2026-08-17 w górę.
+
 | Znaczek | Znaczenie |
 |---|---|
 | 🔴 | korekta jeszcze niedostępna dla tego lead_days — za mało sparowanych obserwacji prognoza/rzeczywistość w CSV (próg `min_samples=5`) |
