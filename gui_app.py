@@ -710,7 +710,15 @@ def run_simulation(
                 # jako "zmienione" - nie ma z czym porównać.
                 def _mark(key: str, value) -> str:
                     changed = prev_vals is None or prev_vals.get(key) != current_vals.get(key)
-                    s = str(value)
+                    # NAPRAWIONE: str(27.0) -> "27.0" (Python zawsze dodaje
+                    # ".0" dla całkowitych floatów), a tabela przed tą zmianą
+                    # (surowe float64 -> renderer Gradio) pokazywała takie
+                    # wartości bez zbędnego zera ("27", "1010", "0" - patrz
+                    # dowolny wcześniejszy zrzut tabeli). {:g} odtwarza to
+                    # zachowanie (usuwa nieznaczące zera), nie psując
+                    # precyzji - wszystkie wartości tu i tak są już
+                    # zaokrąglone do 1 miejsca (round(..., 1) wyżej).
+                    s = f"{value:g}" if isinstance(value, float) else str(value)
                     return f'<span class="val-changed">{s}</span>' if changed else s
 
                 _LAST_PULL[pull_key] = current_vals
