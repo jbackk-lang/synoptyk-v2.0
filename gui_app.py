@@ -672,9 +672,17 @@ def run_simulation(
                 typ = f"{_bias_badge(day_idx, bias_table)} {day_text}"
 
                 # sygnały TIMDR → szersze pasmo (wyświetlane w polu Typ)
+                # ZMIENIONE: wcześniej doklejane były skróty każdego
+                # aktywnego sygnału ("⚡ano·def", przy wszystkich trzech
+                # "⚡ano·def·rez") - użytkownik poprosił o krótszy zapis,
+                # bez rozbicia na osobne skróty. Sam ⚡ wystarcza jako
+                # sygnał "coś z TIMDR jest aktywne" - rozwinięcie
+                # (anomalia/defekt/rezonans) jest i tak w legendzie w menu
+                # bocznym, więc informacja nie ginie, kolumna "Typ" tylko
+                # się nie rozciąga.
                 signals = [k for k in ("anomalia", "defekt", "rezonans") if timdr_results.get(k)]
                 if signals:
-                    typ += f" ⚡{'·'.join(s[:3] for s in signals)}"
+                    typ += " ⚡"
 
                 # ── EV: skok głównego silnika względem poprzedniego pulla ──
                 # DODANE: wydzielone z "Typ" do osobnej kolumny "EV" - "Typ"
@@ -702,24 +710,28 @@ def run_simulation(
                 # pullu" od "identyczna jak poprzednio" - użytkownik zgłosił,
                 # że kilka pulli z rzędu (nawet po restarcie serwera) dało
                 # bajt-identyczne wyniki i za każdym razem musiał wklejać tu,
-                # żeby to sprawdzić. Zamiast tego: wartość, która zmieniła
-                # się względem _LAST_PULL dla tego (stacja, dzień), dostaje
-                # kolor; niezmieniona zostaje zwykłym tekstem ("mocno biała"
-                # z perspektywy użytkownika - czyli po prostu bez wyróżnienia).
-                # Pierwszy pull dla danego dnia (brak wpisu w cache) liczy się
-                # jako "zmienione" - nie ma z czym porównać.
+                # żeby to sprawdzić. Wartość, która zmieniła się względem
+                # _LAST_PULL dla tego (stacja, dzień), dostaje prefiks "▲";
+                # niezmieniona zostaje zwykłym tekstem. Pierwszy pull dla
+                # danego dnia (brak wpisu w cache) liczy się jako
+                # "zmienione" - nie ma z czym porównać.
+                # NAPRAWIONE x2: dwie pierwsze wersje próbowały pokolorować
+                # wartość przez <span> z datatype="markdown" (escapowane -
+                # użytkownik widział dosłowny tekst tagu), potem
+                # datatype="html" (dalej nic - Gradio widocznie i tak
+                # oczyszcza/ignoruje class/style w tej ścieżce, albo scoped
+                # CSS Svelte nie przebija się do wstrzykiwanej treści -
+                # nieudokumentowane, nie warto dalej zgadywać). Zwykły znak
+                # w zwykłym tekście (datatype="str", tak jak ⚡EV/🔴🟠🟢,
+                # które już DZIAŁAJĄ w tej samej tabeli) nie zależy od
+                # żadnego renderowania HTML, więc gwarantowanie się pokaże.
                 def _mark(key: str, value) -> str:
                     changed = prev_vals is None or prev_vals.get(key) != current_vals.get(key)
-                    # NAPRAWIONE: str(27.0) -> "27.0" (Python zawsze dodaje
-                    # ".0" dla całkowitych floatów), a tabela przed tą zmianą
-                    # (surowe float64 -> renderer Gradio) pokazywała takie
-                    # wartości bez zbędnego zera ("27", "1010", "0" - patrz
-                    # dowolny wcześniejszy zrzut tabeli). {:g} odtwarza to
-                    # zachowanie (usuwa nieznaczące zera), nie psując
-                    # precyzji - wszystkie wartości tu i tak są już
-                    # zaokrąglone do 1 miejsca (round(..., 1) wyżej).
+                    # str(27.0) -> "27.0" (Python zawsze dodaje ".0" dla
+                    # całkowitych floatów) - {:g} usuwa zbędne zero, żeby
+                    # wygladało tak jak przed tą zmianą ("27" nie "27.0").
                     s = f"{value:g}" if isinstance(value, float) else str(value)
-                    return f'<span class="val-changed">{s}</span>' if changed else s
+                    return f"▲{s}" if changed else s
 
                 _LAST_PULL[pull_key] = current_vals
 
@@ -890,11 +902,11 @@ _CSS = """
            wysokością względem zwykłych kolumn tekstowych. .val-changed =
            wartość inna niż w poprzednim pullu dla tego dnia/stacji -
            niezmieniona zostaje zwykłym tekstem bez wyróżnienia. */
-        #forecast_table table td p { margin: 0; }
-        #forecast_table table td .val-changed {
-            color: #2563eb;
-            font-weight: 700;
-        }
+        /* USUNIĘTE: reguła .val-changed (kolor/tło dla <span> w komórce) -
+           próba pokolorowania przez HTML w komórce Dataframe nie zadziałała
+           (dwa podejścia, patrz komentarz przy _mark() w run_simulation) -
+           zamiast tego zmienione wartości dostają zwykły prefiks "▲" w
+           zwykłym tekście, który nie potrzebuje żadnego CSS. */
         /* NAPRAWIONE: nagłówki ("Temp min [°C]", "Ciśnienie [hPa]" itd.)
            ucinały się do "Temp...", "Ciśnie..." - Gradio obcina nagłówek do
            szerokości kolumny bez wglądu w to, że treść jest dłuższa niż
@@ -1145,21 +1157,16 @@ def create_app():
                     elem_id="forecast_table",
                     wrap=False,
                     max_height=1300,
-                    # DODANE: 6 kolumn liczbowych renderowane jako "markdown"
-                    # (przepuszcza surowy <span>) zamiast domyślnego "str" -
-                    # potrzebne, żeby _mark() w run_simulation() mogło
-                    # pokolorować wartości, które faktycznie zmieniły się
-                    # względem poprzedniego pulla dla tego dnia/stacji
-                    # (patrz komentarz "DODANE: wizualne odróżnienie..." przy
-                    # current_vals). Kolejność MUSI odpowiadać cols_order
-                    # niżej: Stacja, Data, Typ, Min, Śr, Max, Opad, Ciśn,
-                    # Wiatr, Kier., Hist. do, V4 °C, EV.
-                    datatype=[
-                        "str", "str", "str",
-                        "markdown", "markdown", "markdown",
-                        "markdown", "markdown", "markdown", "str",
-                        "str", "str", "str",
-                    ],
+                    # ZMIENIONE (cofnięte): próba pokolorowania zmienionych
+                    # wartości przez datatype="markdown"/"html" + <span> nie
+                    # zadziałała w dwóch kolejnych podejściach - użytkownik
+                    # za każdym razem widział tabelę bez żadnego wyróżnienia
+                    # (albo dosłowny tekst tagu). Zamiast dalej zgadywać, co
+                    # dokładnie w tej wersji Gradio blokuje style/class w
+                    # komórce, _mark() w run_simulation() oznacza teraz
+                    # zmienione wartości zwykłym znakiem "▲" w zwykłym
+                    # tekście - stąd z powrotem domyślny "str" dla
+                    # wszystkich kolumn (bez jawnego datatype=).
                     # NAPRAWIONE: "Typ" przy 95px i tak ucinał się do "🔴 +7d …"
                     # (screenshot użytkownika) - "⚡ano·def·rez" w ogóle się nie
                     # mieściło mimo że EV zostało już wydzielone do osobnej
@@ -1223,7 +1230,17 @@ if __name__ == "__main__":
     # try/except na wypadek starszego Gradio, gdzie launch() mógłby nie
     # przyjmować tych kwargs (wtedy i tak działają przez gr.Blocks() w
     # create_app(), więc fallback nic nie traci poza podwójnym ustawieniem).
+    # DODANE: inbrowser=True - otwiera domyślną przeglądarkę na
+    # http://127.0.0.1:7860 automatycznie, gdy serwer jest już gotowy
+    # (Gradio sam czeka na start, nie ma tu wyścigu jak przy ręcznym
+    # "start http://..." w .bat PRZED uruchomieniem serwera). Razem ze
+    # zmianą w run.bat (osobny serwer API przeniesiony do run_api.bat,
+    # nieuruchamiany domyślnie) - jedno okno terminala + jedna karta
+    # przeglądarki, otwierana sama, zamiast dwóch okien konsoli i
+    # ręcznego wpisywania adresu (patrz analizator-gieldowy-v3/run.bat -
+    # ten sam wzorzec jednego okna, na wzór którego o to poprosił
+    # użytkownik).
     try:
-        app.launch(server_name="127.0.0.1", server_port=7860, theme=_THEME, css=_CSS)
+        app.launch(server_name="127.0.0.1", server_port=7860, theme=_THEME, css=_CSS, inbrowser=True)
     except TypeError:
-        app.launch(server_name="127.0.0.1", server_port=7860)
+        app.launch(server_name="127.0.0.1", server_port=7860, inbrowser=True)

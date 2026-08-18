@@ -8,8 +8,9 @@ cls
 cd /d "%~dp0"
 
 echo ============================================================
-echo   SYNOPTYK-v2.0: Uruchamianie Systemu (API + GUI)
+echo   SYNOPTYK-v2.0: Uruchamianie GUI (jedno okno)
 echo   Katalog roboczy: %cd%
+echo   (osobne API/Swagger: uruchom run_api.bat - GUI go nie potrzebuje)
 echo ============================================================
 echo.
 
@@ -45,33 +46,33 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 :: 4. WERYFIKACJA PLIKOW WEJSCIOWYCH
-if not exist "api\main.py" (
-    echo [BLAD] Nie znaleziono pliku "%cd%\api\main.py"
-    echo         Sprawdz, czy ten .bat lezy w tym samym folderze co api\, gui_app.py itd.
-    pause
-    exit /b 1
-)
 if not exist "gui_app.py" (
     echo [BLAD] Nie znaleziono pliku "%cd%\gui_app.py"
-    echo         Sprawdz, czy ten .bat lezy w tym samym folderze co api\, gui_app.py itd.
+    echo         Sprawdz, czy ten .bat lezy w tym samym folderze co gui_app.py.
     pause
     exit /b 1
 )
 
-:: 5. URUCHOMIENIE SERWERA API (w osobnym oknie) ORAZ GUI GRADIO (w tym oknie)
+:: 5. URUCHOMIENIE GUI GRADIO - JEDNO OKNO
+:: ZMIENIONE: wczesniej ten skrypt dodatkowo odpalal "start ... cmd /k
+:: python -m uvicorn api.main:app ..." w OSOBNYM oknie konsoli - gui_app.py
+:: w ogole sie do tego API nie odwoluje (potwierdzone w kodzie - GUI
+:: pobiera dane bezposrednio z Open-Meteo), wiec to okno bylo zbednym
+:: baalastem dla kogos, kto chce tylko GUI. Uzytkownik poprosil o
+:: uruchamianie jednym oknem, tak jak analizator-gieldowy-v3/run.bat.
+:: Przegladarka otwiera sie juz sama (gui_app.py: app.launch(...,
+:: inbrowser=True)) - nie trzeba tego robic tutaj. Kto potrzebuje osobno
+:: dzialajacego API/Swagger (http://127.0.0.1:8000/docs), uruchamia
+:: run_api.bat.
 echo.
-echo [2/2] Uruchamianie Uvicorn API oraz GUI Gradio...
-echo Interfejs API: http://127.0.0.1:8000
-echo Dokumentacja Swagger: http://127.0.0.1:8000/docs
-echo GUI Gradio uruchomi sie zaraz w tym oknie (zwykle http://127.0.0.1:7860)
+echo [2/2] Uruchamianie GUI Gradio...
+echo Przegladarka otworzy sie sama za chwile (http://127.0.0.1:7860)
 echo.
-
-start "Synoptyk API (Uvicorn)" cmd /k python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
 
 python gui_app.py
 
 echo.
 echo ============================================================
-echo GUI zostalo zamkniete. Okno API dziala nadal osobno.
+echo GUI zostalo zamkniete.
 echo ============================================================
 pause

@@ -28,7 +28,7 @@ python gui_app.py
 # GUI dostępne pod http://127.0.0.1:7860
 ```
 
-> **Windows:** zamiast ostatniej linii uruchom `run.bat`
+> **Windows:** zamiast ostatniej linii uruchom `run.bat` — jedno okno konsoli, przeglądarka otwiera się sama pod `http://127.0.0.1:7860` (`app.launch(..., inbrowser=True)`). Osobny serwer API (FastAPI/Uvicorn, `http://127.0.0.1:8000/docs`) GUI nie potrzebuje — jeśli jest potrzebny do czegoś innego, uruchamia się go osobno przez `run_api.bat`.
 
 ---
 
@@ -100,7 +100,7 @@ synoptyk-v2.0/
 
 | Kontrolka | Opis |
 |---|---|
-| Tryb | Cały region / pojedyncze miasto / **dowolny wybór miast** (nowy tryb — patrz niżej) |
+| Tryb | Cały region / pojedyncze miasto / **dowolny wybór miast** |
 | Region | `cała_polska`, `poland_south`, `poland_north`, `poland_central`, `poland_west`, `poland_east` |
 | Miasto | Lista ~40 miast PL (dropwdown) |
 | Historia (dni) | Okno danych archiwalnych do filtra falkowego (3–30 dni) |
@@ -115,7 +115,7 @@ Tabela wyników zawiera kolumny: `Stacja`, `Data`, `Typ` (Dziś/Jutro/+Nd), `EV`
 
 **Korekta obciążenia** (`forecaster/bias_correction.py`, `apply_bias_correction()`): średni zmierzony błąd (rzeczywistość − prognoza) per `lead_days`, liczony na żywo z `krakow_forecast_snapshots.csv` przy każdym uruchomieniu. To NIE jest model ML — nie ma osobnego kroku treningowego, korekta po prostu "uczy się" w miarę przybywania sparowanych obserwacji w CSV.
 
-**DODANE — porównanie trafności głównego toru i V4 z rzeczywistością**: `krakow_forecast_snapshots.csv` ma teraz dodatkowe kolumny `v4_point_c`/`v4_lower_c`/`v4_upper_c` (punkt + pasmo `SynoptykV4.forecast()`, zapisywane od danej daty pulla w górę — starsze wiersze mają je puste). `compute_lead_bias()` przyjmuje opcjonalny `forecast_col` (domyślnie `"avg_temp_c"` - główny tor); wywołanie z `forecast_col="v4_point_c"` liczy dokładnie te same statystyki (bias/MAE per `lead_days`) dla samodzielnego toru V4. Dopóki nie ma realnych obserwacji sparowanych z wierszami po dodaniu tych kolumn, zwraca pusty słownik (brak danych, nie zero) — zacznie się wypełniać w miarę przybywania kolejnych `IMGW_real_*`/`web_szukaj_*` w CSV dla dat od 2026-08-17 w górę.
+**Porównanie trafności głównego toru i V4 z rzeczywistością**: `krakow_forecast_snapshots.csv` ma dodatkowe kolumny `v4_point_c`/`v4_lower_c`/`v4_upper_c` (punkt + pasmo `SynoptykV4.forecast()`, zapisywane od danej daty pulla w górę — starsze wiersze mają je puste). `compute_lead_bias()` przyjmuje opcjonalny `forecast_col` (domyślnie `"avg_temp_c"` - główny tor); wywołanie z `forecast_col="v4_point_c"` liczy dokładnie te same statystyki (bias/MAE per `lead_days`) dla samodzielnego toru V4. Dopóki nie ma realnych obserwacji sparowanych z wierszami po dodaniu tych kolumn, zwraca pusty słownik (brak danych, nie zero) — zacznie się wypełniać w miarę przybywania kolejnych `IMGW_real_*`/`web_szukaj_*` w CSV dla dat od 2026-08-17 w górę.
 
 | Znaczek | Znaczenie |
 |---|---|
@@ -127,9 +127,9 @@ Dziennik dodatkowo informuje o tym samym wprost (`🎯 <stacja>: korekta obcią�
 
 **Wykrywanie skoku silnika (`⚡EV`)**: `Typ` dostaje dopisek `⚡EV`, gdy `Śr °C`/`Opad mm`/`Ciśn hPa`/`Wiatr km/h` dla tego samego dnia docelowego zmieniły się między poprzednim a bieżącym uruchomieniem GUI powyżej progu (odpowiednio 2°C / 10mm / 5hPa / 8km/h) — `detect_engine_volatility()` w `gui_app.py`. Pamięć poprzedniego pulla trzymana jest na dysku (`_last_pull_cache.json` obok `gui_app.py`, w `.gitignore`) i wczytywana przy starcie, więc przetrwa restart serwera. Przycisk „🔄 Wyczyść cache (EV)” czyści ją ręcznie (przydatne po nagromadzeniu starych wpisów z innych stacji/trybów) — nie dotyka `krakow_forecast_snapshots.csv` (osobna, celowo trwała historia dla korekty obciążenia). Po wyczyszczeniu pierwszy kolejny pull nie ma z czym się porównać, więc `⚡EV` zacznie znów działać dopiero od pulla PO NASTĘPNYM.
 
-**DODANE — kolorowanie zmienionych wartości**: `Min/Śr/Max °C`, `Opad mm`, `Ciśn hPa`, `Wiatr km/h` — wartość, która różni się od poprzedniego pulla dla tego samego dnia/stacji, pokazuje się na niebiesko i pogrubiona; niezmieniona zostaje zwykłym tekstem. Pierwszy pull dla danego dnia (brak wpisu w `_last_pull_cache.json`) liczy się jako "zmienione". Pozwala na pierwszy rzut oka odróżnić świeży wynik od powtórki (np. gdy Open-Meteo jeszcze nie zaktualizowało modelu między dwoma uruchomieniami) bez wklejania tabeli do sprawdzenia.
+**Oznaczenie zmienionych wartości**: `Min/Śr/Max °C`, `Opad mm`, `Ciśn hPa`, `Wiatr km/h` — wartość, która różni się od poprzedniego pulla dla tego samego dnia/stacji, dostaje prefiks `▲` (np. `▲16.9`); niezmieniona zostaje zwykłym tekstem bez prefiksu. Pierwszy pull dla danego dnia (brak wpisu w `_last_pull_cache.json`) liczy się jako "zmienione". Pozwala na pierwszy rzut oka odróżnić świeży wynik od powtórki (np. gdy Open-Meteo jeszcze nie zaktualizowało modelu między dwoma uruchomieniami) bez wklejania tabeli do sprawdzenia.
 
-**Sygnały TIMDR** (`⚡anomalia`/`defekt`/`rezonans`): `analyzer/timdr_analyzer.py` analizuje dane historyczne pobrane przez `_fetch_historical()` (adaptowane do oczekiwanego formatu przez `_adapt_for_timdr()` w `gui_app.py`). Progi kalibrowane na żywo z tego samego okna danych, gdy `weather_cache.db`/klimatologia są puste (patrz `AdaptiveThresholds.fallback_df`, sekcja „Znane ograniczenia”). `AdaptiveThresholds.get_thresholds()` cache'uje wynik per `(miesiąc, parametr)`/`param` (i wynik zapytania do `weather_cache.db`) na czas życia obiektu — bez tego, przy 30-dniowej historii godzinowej (720 wierszy) i kilku stacjach naraz, ten sam zestaw statystyk był liczony od zera przy każdym z ~15 wywołań na wiersz (zgłoszone: ~300s dla 3 stacji przy suwakach na max).
+**Sygnały TIMDR** (`⚡anomalia`/`defekt`/`rezonans`): w kolumnie `Typ` widoczny jest sam `⚡` — pełne znaczenie jest w legendzie w menu bocznym. `analyzer/timdr_analyzer.py` analizuje dane historyczne pobrane przez `_fetch_historical()` (adaptowane do oczekiwanego formatu przez `_adapt_for_timdr()` w `gui_app.py`). Progi kalibrowane na żywo z tego samego okna danych, gdy `weather_cache.db`/klimatologia są puste (patrz `AdaptiveThresholds.fallback_df`, sekcja „Znane ograniczenia”). `AdaptiveThresholds.get_thresholds()` cache'uje wynik per `(miesiąc, parametr)`/`param` na czas życia obiektu, więc te same statystyki nie są przeliczane od nowa przy każdym z wielu wywołań na wiersz.
 
 `Kier.` — kierunek wiatru jako pojedyncza strzałka (↑↗→↘↓↙←↖, 8 kierunków), licząca **dokąd** wiatr wieje (nie skąd). Dzienna wartość to średnia wektorowa (kołowa) godzinowych odczytów — `_circular_mean_deg()` w `gui_app.py` (ten sam mechanizm co `SynoptykV4.forecast_wind_direction()`).
 
