@@ -107,11 +107,11 @@ synoptyk-v2.0/
 | Prognoza (dni) | Liczba dni naprzód w tabeli wyników (1–14) |
 | Tryb Demo | Dane zastępcze „–" gdy brak dostępu do API |
 
-Tabela wyników zawiera kolumny: `Stacja`, `Data`, `Typ` (Dziś/Jutro/+Nd), `EV`, `Min °C`, `Śr °C`, `Max °C`, `Opad mm`, `Ciśn hPa`, `Wiatr km/h`, `Kier.`, `Hist. do`, `V4 °C`.
+Tabela wyników zawiera kolumny: `Stacja` (nazwa miasta, ewentualnie z dopiskiem `⚡EV`), `Data`, `Typ` (Dziś/2d/3d/…/14d), `Min °C`, `Śr °C`, `Max °C`, `Opad mm`, `Ciśn hPa`, `Wiatr km/h`, `Kier.`, `Hist. do`, `V4 °C`.
 
 **Tryb „Wybór miast”** — dowolna kombinacja miast z listy (`gr.Dropdown(multiselect=True)`), niezależna od sztywnych grup w `REGIONS_MAP` (np. Kraków + Gdańsk + Warszawa naraz, mimo że są w trzech różnych regionach). Pusty wybór daje fallback na `Krakow_Centrum` z ostrzeżeniem w Dzienniku. Domyślny tryb startowy to jednak `Pojedyncze miasto`/`Krakow_Centrum` — przy trybie „Cały Region” (do 7 stacji × 14 dni = do 98 wierszy) trzeba przewijać tabelę, żeby zobaczyć wszystkie stacje.
 
-**Kolumna `Typ`** łączy znaczek korekty obciążenia (🔴/🟠/🟢) i dzień (`Dziś`/`Jutro`/`+Nd`). Skok głównego silnika (`⚡EV`) ma własną, osobną kolumnę `EV` (`⚡EV` albo `–`) — łatwiej wychwycić wzrokiem, w którym wierszu coś skoczyło, niż szukać dopisku w gąszczu tekstu `Typ`.
+**Kolumna `Typ`** łączy znaczek korekty obciążenia (🔴/🟠/🟢) i dzień (`Dziś`/`2d`/`3d`/…/`14d`). Skok głównego silnika (`⚡EV`) jest dopisywany do nazwy stacji w kolumnie `Stacja` (np. `Krakow_Centrum ⚡EV`), wyrównanej do prawej strony komórki.
 
 **Korekta obciążenia** (`forecaster/bias_correction.py`, `apply_bias_correction()`): średni zmierzony błąd (rzeczywistość − prognoza) per `lead_days`, liczony na żywo z `krakow_forecast_snapshots.csv` przy każdym uruchomieniu. To NIE jest model ML — nie ma osobnego kroku treningowego, korekta po prostu "uczy się" w miarę przybywania sparowanych obserwacji w CSV.
 

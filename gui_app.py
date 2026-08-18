@@ -743,11 +743,16 @@ def run_simulation(
                     v4_upper = round(float(v4_forecast["upper"][day_idx]), 1)
                     v4_str = f"{v4_point} [{v4_lower}–{v4_upper}]"
 
+                # ZMIENIONE: osobna kolumna "EV" zwinięta z powrotem do
+                # "Stacja" - użytkownik chciał ją tam, wyrównaną do prawej
+                # strony komórki (patrz text-align:right na .stacja-cell w
+                # CSS niżej), zamiast osobnej kolumny zajmującej miejsce.
+                stacja_str = f"{node} ⚡EV" if ev_flag == "⚡EV" else node
+
                 rows.append({
-                    "Stacja":   node,
+                    "Stacja":   stacja_str,
                     "Data":     str(day_label),
                     "Typ":      typ,
-                    "EV":       ev_flag,
                     "Min °C":   _mark("Min °C", t_min),
                     "Śr °C":    _mark("Śr °C", t_avg),
                     "Max °C":   _mark("Max °C", t_max),
@@ -770,14 +775,15 @@ def run_simulation(
     # jednostki + istotnego słowa (Min/Śr/Max °C, Opad mm, Ciśn hPa,
     # Wiatr km/h, Hist. do, V4 °C) - to i tak jest oczywiste w kontekście
     # tabeli prognozy, więc żadna informacja się nie gubi.
-    # ZMIENIONE: "EV" przeniesione z 4. pozycji (zaraz po "Typ") na sam
-    # koniec, na prawo za "V4 °C" - użytkownik wolał mieć rzadki, najbardziej
-    # "alarmowy" sygnał z boku, nie wciśnięty między "Typ" a kolumny liczbowe.
+    # ZMIENIONE: osobna kolumna "EV" usunięta - "⚡EV" jest teraz dopisywane
+    # bezpośrednio do "Stacja" (patrz stacja_str wyżej), wyrównane do prawej
+    # strony komórki przez CSS (.col-stacja niżej), zamiast zajmować całą
+    # dodatkową kolumnę.
     cols_order = [
         "Stacja", "Data", "Typ",
         "Min °C", "Śr °C", "Max °C",
         "Opad mm", "Ciśn hPa", "Wiatr km/h", "Kier.",
-        "Hist. do", "V4 °C", "EV",
+        "Hist. do", "V4 °C",
     ]
     for c in cols_order:
         if c not in df_out.columns:
@@ -896,17 +902,16 @@ _CSS = """
                 Helvetica, Arial, sans-serif, "Apple Color Emoji",
                 "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
         }
-        /* DODANE: "markdown" datatype w komórkach liczbowych (patrz
-           gr.Dataframe/_mark() w run_simulation) domyślnie owija treść w
-           <p> z marginesem - zerowane, żeby wiersze nie "podskakiwały"
-           wysokością względem zwykłych kolumn tekstowych. .val-changed =
-           wartość inna niż w poprzednim pullu dla tego dnia/stacji -
-           niezmieniona zostaje zwykłym tekstem bez wyróżnienia. */
-        /* USUNIĘTE: reguła .val-changed (kolor/tło dla <span> w komórce) -
-           próba pokolorowania przez HTML w komórce Dataframe nie zadziałała
-           (dwa podejścia, patrz komentarz przy _mark() w run_simulation) -
-           zamiast tego zmienione wartości dostają zwykły prefiks "▲" w
-           zwykłym tekście, który nie potrzebuje żadnego CSS. */
+        /* Zmienione wartości mają prefiks "▲" w zwykłym tekście (patrz
+           _mark() w run_simulation) - nie potrzebuje żadnego CSS. */
+        /* "Stacja" (1. kolumna) wyrównana do prawej strony komórki - niesie
+           teraz też "⚡EV" dopisane do nazwy miasta (patrz stacja_str w
+           run_simulation), więc lewe wyrównanie zostawiało nierówną,
+           "postrzępioną" krawędź tekstu; prawe wyrównanie równa to ładnie
+           niezależnie od tego, czy w wierszu jest EV, czy nie. */
+        #forecast_table table td:nth-child(1) {
+            text-align: right !important;
+        }
         /* NAPRAWIONE: nagłówki ("Temp min [°C]", "Ciśnienie [hPa]" itd.)
            ucinały się do "Temp...", "Ciśnie..." - Gradio obcina nagłówek do
            szerokości kolumny bez wglądu w to, że treść jest dłuższa niż
@@ -1167,26 +1172,19 @@ def create_app():
                     # zmienione wartości zwykłym znakiem "▲" w zwykłym
                     # tekście - stąd z powrotem domyślny "str" dla
                     # wszystkich kolumn (bez jawnego datatype=).
-                    # "Typ" zawiera teraz krótszy tekst niż wcześniej (sam
-                    # "⚡" zamiast "⚡ano·def·rez" - patrz komentarz przy
-                    # `typ += " ⚡"` w run_simulation) - najdłuższy realny
-                    # przypadek to "🟠 +13d ⚡" (2 emoji + " +13d "), więc
-                    # 180px zostawiało duży pusty margines i psuło wygląd
-                    # tabeli. Zwężone do 120px. "EV" (60px, tylko "⚡EV"
-                    # albo "–") jest na końcu wiersza, za "V4 °C" - patrz
-                    # cols_order w run_simulation. wrap=False + nowrap w CSS
-                    # = ucina zamiast łamać wiersz, więc wysokość rzędów
-                    # zostaje równa.
-                    # "Typ" zwężone 120px->90px (bez "⚡" zostaje tylko
-                    # znaczek + krótki dzień, np. "🟠 +13d"). "Wiatr km/h"
-                    # zwężone 110px->85px (wartości max ok. "24.7", nie
-                    # potrzebują tyle co "Ciśn hPa" z 4 cyframi części
-                    # całkowitej).
+                    # "Stacja" poszerzone 150px->180px - mieści teraz też
+                    # dopisane "⚡EV" (patrz stacja_str w run_simulation),
+                    # wyrównane do prawej strony komórki (.col-stacja w CSS
+                    # niżej). "Typ" zwężone do 90px (sam znaczek + krótki
+                    # dzień, np. "🟠 13d"). "Wiatr km/h" zwężone do 85px
+                    # (wartości krótsze niż "Ciśn hPa"). Osobna kolumna "EV"
+                    # usunięta. wrap=False + nowrap w CSS = ucina zamiast
+                    # łamać wiersz, więc wysokość rzędów zostaje równa.
                     column_widths=[
-                        "150px", "105px", "90px",
+                        "180px", "105px", "90px",
                         "95px", "95px", "95px",
                         "90px", "110px", "85px", "50px",
-                        "115px", "160px", "60px",
+                        "115px", "160px",
                     ],
                 )
 
