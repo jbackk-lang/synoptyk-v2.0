@@ -621,14 +621,19 @@ def run_simulation(
 
             for day_idx, (day_dt, row_s) in enumerate(daily.iterrows()):
                 day_label = day_dt.date()
-                # napis "Dziś / Jutro / +Nd"
+                # napis "Dziś / 2d / 3d / ... / 14d"
+                # ZMIENIONE: "Jutro" i "+Nd" (kończące się na "+13d" przy
+                # 14-dniowej prognozie) zastąpione ciągłym numerowaniem dnia
+                # (delta+1) - użytkownik nie chciał kończyć na "13". Gołe
+                # liczby bez jednostki ("2", "3"...) wyglądały niejasno obok
+                # daty w sąsiedniej kolumnie "Data" - dopisane "d" (dzień),
+                # bez "+" z przodu. "Dziś" zostaje bez zmian (jedyny
+                # opisowy, nie numeryczny dzień).
                 delta = (day_label - date.today()).days
                 if delta == 0:
                     day_text = "Dziś"
-                elif delta == 1:
-                    day_text = "Jutro"
                 else:
-                    day_text = f"+{delta}d"
+                    day_text = f"{delta + 1}d"
 
                 # korekta UHI + lapse rate + falkowa
                 # NAPRAWIONE: zaokrąglamy CAŁĄ sumę (nie tylko base_correction),
@@ -671,18 +676,13 @@ def run_simulation(
                     t_avg = apply_bias_correction(t_avg, day_idx, bias_table)
                 typ = f"{_bias_badge(day_idx, bias_table)} {day_text}"
 
-                # sygnały TIMDR → szersze pasmo (wyświetlane w polu Typ)
-                # ZMIENIONE: wcześniej doklejane były skróty każdego
-                # aktywnego sygnału ("⚡ano·def", przy wszystkich trzech
-                # "⚡ano·def·rez") - użytkownik poprosił o krótszy zapis,
-                # bez rozbicia na osobne skróty. Sam ⚡ wystarcza jako
-                # sygnał "coś z TIMDR jest aktywne" - rozwinięcie
-                # (anomalia/defekt/rezonans) jest i tak w legendzie w menu
-                # bocznym, więc informacja nie ginie, kolumna "Typ" tylko
-                # się nie rozciąga.
-                signals = [k for k in ("anomalia", "defekt", "rezonans") if timdr_results.get(k)]
-                if signals:
-                    typ += " ⚡"
+                # sygnały TIMDR - USUNIĘTE z kolumny "Typ" (był tam "⚡",
+                # wcześniej "⚡ano·def"/"⚡ano·def·rez"). Przez czułość progu
+                # opadu (patrz "Znane ograniczenia" w README) sygnał
+                # praktycznie zawsze jest aktywny - w tabeli nie odróżniał
+                # więc nic od niczego, tylko zajmował miejsce. `timdr_results`
+                # jest nadal liczone (patrz wyżej) - gdyby ktoś chciał to
+                # z powrotem, wystarczy dociągnąć znów do `typ`.
 
                 # ── EV: skok głównego silnika względem poprzedniego pulla ──
                 # DODANE: wydzielone z "Typ" do osobnej kolumny "EV" - "Typ"
@@ -1081,8 +1081,8 @@ def create_app():
                     "- 🟠 aktywna, mała próbka (uwaga, orientacyjna)\n"
                     "- 🔴 jeszcze niedostępna (za mało danych w historii)\n\n"
                     "Dodatkowo: `⚡EV` = wykryty skok głównego silnika względem "
-                    "poprzedniego uruchomienia; `⚡anomalia/defekt/rezonans` = "
-                    "aktywny sygnał TIMDR.\n\n"
+                    "poprzedniego uruchomienia; `▲` przy wartości = zmieniła się "
+                    "względem poprzedniego pulla.\n\n"
                     # NAPRAWIONE: pomyłka w poprzedniej wersji tej notatki -
                     # chodziło o SUWAK PRZEWIJANIA SAMEJ TABELI (scrollbar
                     # kontenera wyników), nie o suwaki "Historia"/"Prognoza"
@@ -1177,10 +1177,15 @@ def create_app():
                     # cols_order w run_simulation. wrap=False + nowrap w CSS
                     # = ucina zamiast łamać wiersz, więc wysokość rzędów
                     # zostaje równa.
+                    # "Typ" zwężone 120px->90px (bez "⚡" zostaje tylko
+                    # znaczek + krótki dzień, np. "🟠 +13d"). "Wiatr km/h"
+                    # zwężone 110px->85px (wartości max ok. "24.7", nie
+                    # potrzebują tyle co "Ciśn hPa" z 4 cyframi części
+                    # całkowitej).
                     column_widths=[
-                        "150px", "105px", "120px",
+                        "150px", "105px", "90px",
                         "95px", "95px", "95px",
-                        "90px", "110px", "110px", "50px",
+                        "90px", "110px", "85px", "50px",
                         "115px", "160px", "60px",
                     ],
                 )
