@@ -1167,22 +1167,18 @@ def create_app():
                     # zmienione wartości zwykłym znakiem "▲" w zwykłym
                     # tekście - stąd z powrotem domyślny "str" dla
                     # wszystkich kolumn (bez jawnego datatype=).
-                    # NAPRAWIONE: "Typ" przy 95px i tak ucinał się do "🔴 +7d …"
-                    # (screenshot użytkownika) - "⚡ano·def·rez" w ogóle się nie
-                    # mieściło mimo że EV zostało już wydzielone do osobnej
-                    # kolumny. Pierwsza poprawka (135px) OKAZAŁA SIĘ WCIĄŻ ZA
-                    # WĄSKA na kolejnym screenshocie ("🔴 Dziś ⚡ an…") - emoji
-                    # w praktyce zajmują więcej miejsca niż zwykłe znaki, a
-                    # padding (10px x2) zjada dodatkowe 20px. Poszerzone do
-                    # 180px - z zapasem mieści najdłuższy realny przypadek
-                    # "🔴 +13d ⚡ano·def·rez" bez elipsy. ZMIENIONE: "EV" (60px,
-                    # tylko "⚡EV" albo "–") przeniesione z 4. pozycji (zaraz
-                    # po "Typ") na sam koniec wiersza, za "V4 °C" - patrz
-                    # cols_order w run_simulation. wrap=False + nowrap w CSS =
-                    # ucina zamiast łamać wiersz, więc wysokość rzędów
+                    # "Typ" zawiera teraz krótszy tekst niż wcześniej (sam
+                    # "⚡" zamiast "⚡ano·def·rez" - patrz komentarz przy
+                    # `typ += " ⚡"` w run_simulation) - najdłuższy realny
+                    # przypadek to "🟠 +13d ⚡" (2 emoji + " +13d "), więc
+                    # 180px zostawiało duży pusty margines i psuło wygląd
+                    # tabeli. Zwężone do 120px. "EV" (60px, tylko "⚡EV"
+                    # albo "–") jest na końcu wiersza, za "V4 °C" - patrz
+                    # cols_order w run_simulation. wrap=False + nowrap w CSS
+                    # = ucina zamiast łamać wiersz, więc wysokość rzędów
                     # zostaje równa.
                     column_widths=[
-                        "150px", "105px", "180px",
+                        "150px", "105px", "120px",
                         "95px", "95px", "95px",
                         "90px", "110px", "110px", "50px",
                         "115px", "160px", "60px",
