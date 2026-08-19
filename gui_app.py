@@ -22,6 +22,7 @@ Zmiany względem oryginału:
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import sys
@@ -255,6 +256,94 @@ def _load_csv_history_fallback(csv_path: str, station: str) -> pd.DataFrame | No
     if len(out) < 2:
         return None
     return out
+
+
+_CSV_FIELDNAMES = [
+    "station", "target_date", "issue_date", "pull_seq", "lead_days",
+    "min_temp_c", "avg_temp_c", "max_temp_c", "precip_mm",
+    "pressure_hpa", "wind_kmh", "source", "v4_point_c", "v4_lower_c", "v4_upper_c",
+]
+
+_CSV_RETENTION_DAYS = 30
+
+
+def _prune_old_csv_rows(csv_path: str, keep_days: int = _CSV_RETENTION_DAYS) -> None:
+    """Utrzymuje krakow_forecast_snapshots.csv w rozsądnym rozmiarze - usuwa
+    wiersze, których target_date jest starsza niż `keep_days` dni wstecz od
+    dziś. Wywoływane po każdym automatycznym dopisie (patrz
+    _autosave_forecast_to_csv), więc plik nie rośnie w nieskończoność przy
+    wielu uruchomieniach GUI dziennie.
+
+    Wyjątek: wiersze stacji `_META_` (znaczniki typu ENGINE_BASELINE_...,
+    patrz README) NIE są tu usuwane - to nie są dane pomiarowe/prognozy,
+    tylko trwałe adnotacje o stanie silnika, mają obowiązywać niezależnie
+    od wieku."""
+    try:
+        df = pd.read_csv(csv_path, dtype={"source": str})
+    except Exception:
+        return
+    if "target_date" not in df.columns or df.empty:
+        return
+    td = pd.to_datetime(df["target_date"], errors="coerce")
+    cutoff = pd.Timestamp(date.today() - timedelta(days=keep_days))
+    # td.isna() (data nie do sparsowania) -> zostaw, nie zgadujemy czy stara
+    keep_mask = (td >= cutoff) | (df["station"] == "_META_") | td.isna()
+    if keep_mask.all():
+        return  # nic do wycięcia, oszczędź zapis pliku
+    try:
+        df.loc[keep_mask, _CSV_FIELDNAMES].to_csv(csv_path, index=False)
+    except Exception:
+        pass  # sprzątanie CSV to wygoda, nie krytyczna ścieżka
+
+
+def _autosave_forecast_to_csv(csv_path: str, station: str, issue_date_str: str, rows: list[dict]) -> None:
+    """Dopisuje WŁASNĄ prognozę (dokładnie te same liczby, co trafiają do
+    tabeli GUI - po korekcie UHI/falkowej/blendingu/obciążenia, PRZED
+    prefiksem "▲") do krakow_forecast_snapshots.csv automatycznie, przy
+    każdym uruchomieniu - bez konieczności ręcznego wklejania wyniku z GUI,
+    tak jak robiło się to dotychczas. source="prognoza_blending_bias" -
+    ten sam, którego już używają ręcznie wklejone pulle, więc bias_correction
+    i porównania w CSV nie muszą tego rozróżniać.
+
+    pull_seq liczony per (stacja, issue_date) jako max istniejącego + 1 -
+    ta sama konwencja co przy ręcznym dopisywaniu przez całą tę sesję, więc
+    kilka uruchomień GUI tego samego dnia dostaje kolejne numery, nie
+    nadpisuje się nawzajem.
+
+    Nie dotyczy wierszy ⚠️FB (fallback) ani Trybu Demo - te NIE są wywoływane
+    z tą funkcją (patrz miejsce wywołania w run_simulation) - dopisywanie do
+    CSV danych, które same pochodzą z CSV (fallback), byłoby kołowe."""
+    if not rows:
+        return
+    try:
+        existing = pd.read_csv(csv_path, dtype={"source": str})
+        mask = (
+            (existing["station"] == station)
+            & (existing["issue_date"] == issue_date_str)
+            & (existing["source"] == "prognoza_blending_bias")
+        )
+        prior_seqs = pd.to_numeric(existing.loc[mask, "pull_seq"], errors="coerce").dropna()
+        pull_seq = int(prior_seqs.max()) + 1 if len(prior_seqs) else 1
+    except Exception:
+        pull_seq = 1
+
+    try:
+        file_exists = os.path.exists(csv_path)
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=_CSV_FIELDNAMES)
+            if not file_exists:
+                w.writeheader()
+            for r in rows:
+                out_row = {k: r.get(k, "") for k in _CSV_FIELDNAMES}
+                out_row["station"] = station
+                out_row["issue_date"] = issue_date_str
+                out_row["pull_seq"] = pull_seq
+                out_row["source"] = "prognoza_blending_bias"
+                w.writerow(out_row)
+    except Exception:
+        return  # autosave to wygoda, nie krytyczna ścieżka - nie wywalamy appki przez to
+
+    _prune_old_csv_rows(csv_path)
 
 
 def _adapt_for_timdr(df_hist: pd.DataFrame) -> pd.DataFrame:
@@ -705,6 +794,14 @@ def run_simulation(
         # lepsze przybliżenie niż całkowity brak wiersza.
         own_precip   = _own_trend_points(df_hist, "precip", "sum", forecast_days)
 
+        # DODANE: surowe (bez prefiksu "▲", przed formatowaniem na tekst)
+        # wartości tego pulla - do automatycznego dopisu do
+        # krakow_forecast_snapshots.csv na końcu pętli dni (patrz
+        # _autosave_forecast_to_csv niżej). Osobna lista od `rows` (które
+        # idą do tabeli GUI jako sformatowany tekst) - łatwiej trzymać
+        # czyste liczby niż odklejać "▲" z powrotem.
+        own_pull_rows: list[dict] = []
+
         # ── prognoza Open-Meteo ─────────────────────────────────────────────
         try:
             df_fc = _fetch_forecast(lat, lon, forecast_days)
@@ -904,6 +1001,23 @@ def run_simulation(
                     "Hist. do": data_end_str,
                     "V4 °C":    v4_str,
                 })
+
+                own_pull_rows.append({
+                    "target_date": str(day_label),
+                    "lead_days": day_idx,
+                    "min_temp_c": t_min, "avg_temp_c": t_avg, "max_temp_c": t_max,
+                    "precip_mm": precip, "pressure_hpa": press, "wind_kmh": wind,
+                    "v4_point_c": v4_point if v4_forecast is not None and day_idx < len(v4_forecast["point"]) else "",
+                    "v4_lower_c": v4_lower if v4_forecast is not None and day_idx < len(v4_forecast["point"]) else "",
+                    "v4_upper_c": v4_upper if v4_forecast is not None and day_idx < len(v4_forecast["point"]) else "",
+                })
+
+            # DODANE: automatyczny zapis tego pulla do CSV - patrz
+            # _autosave_forecast_to_csv() po pełne uzasadnienie. Tylko dla
+            # normalnej ścieżki (żywe Open-Meteo) - fallback ⚠️FB i Tryb Demo
+            # nie wywołują tego (fallback sam pochodzi z CSV, dopisywanie
+            # byłoby kołowe; Demo to gołe "–", nic sensownego do zapisania).
+            _autosave_forecast_to_csv(_SNAPSHOTS_CSV, node, str(date.today()), own_pull_rows)
 
         except Exception as e:
             logs.append(f"✗  {node}: błąd prognozy: {e}")
