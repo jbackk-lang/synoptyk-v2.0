@@ -266,18 +266,32 @@ _CSV_FIELDNAMES = [
 
 _CSV_RETENTION_DAYS = 30
 
+_ARCHIVE_CSV_SUFFIX = "_archive.csv"  # krakow_forecast_snapshots.csv -> krakow_forecast_snapshots_archive.csv
+
+
+def _archive_path_for(csv_path: str) -> str:
+    base, _ext = os.path.splitext(csv_path)
+    return base + _ARCHIVE_CSV_SUFFIX
+
 
 def _prune_old_csv_rows(csv_path: str, keep_days: int = _CSV_RETENTION_DAYS) -> None:
-    """Utrzymuje krakow_forecast_snapshots.csv w rozsądnym rozmiarze - usuwa
-    wiersze, których target_date jest starsza niż `keep_days` dni wstecz od
-    dziś. Wywoływane po każdym automatycznym dopisie (patrz
-    _autosave_forecast_to_csv), więc plik nie rośnie w nieskończoność przy
-    wielu uruchomieniach GUI dziennie.
+    """Utrzymuje krakow_forecast_snapshots.csv w rozsądnym rozmiarze, ALE NIC
+    NIE KASUJE bezpowrotnie: wiersze, których target_date jest starsza niż
+    `keep_days` dni wstecz od dziś, są NAJPIERW dopisywane do pliku
+    archiwalnego (`krakow_forecast_snapshots_archive.csv`, ten sam schemat
+    kolumn, NIGDY nie przycinany), a dopiero potem usuwane z pliku "gorącego".
+    Historia jest więc zawsze dostępna do analizy — tylko podzielona na
+    "bieżący log" (mały, szybki do wczytania przy każdym uruchomieniu) i
+    "archiwum" (pełna historia, osobno).
+
+    Wywoływane po każdym automatycznym dopisie (patrz
+    _autosave_forecast_to_csv), więc plik roboczy nie rośnie w nieskończoność
+    przy wielu uruchomieniach GUI dziennie.
 
     Wyjątek: wiersze stacji `_META_` (znaczniki typu ENGINE_BASELINE_...,
-    patrz README) NIE są tu usuwane - to nie są dane pomiarowe/prognozy,
-    tylko trwałe adnotacje o stanie silnika, mają obowiązywać niezależnie
-    od wieku."""
+    patrz README) NIE są tu ruszane w ogóle - to nie są dane pomiarowe/
+    prognozy, tylko trwałe adnotacje o stanie silnika, mają obowiązywać
+    niezależnie od wieku i zostają w pliku roboczym na stałe."""
     try:
         df = pd.read_csv(csv_path, dtype={"source": str})
     except Exception:
@@ -289,11 +303,23 @@ def _prune_old_csv_rows(csv_path: str, keep_days: int = _CSV_RETENTION_DAYS) -> 
     # td.isna() (data nie do sparsowania) -> zostaw, nie zgadujemy czy stara
     keep_mask = (td >= cutoff) | (df["station"] == "_META_") | td.isna()
     if keep_mask.all():
-        return  # nic do wycięcia, oszczędź zapis pliku
+        return  # nic do wyniesienia do archiwum, oszczędź zapis plików
+
+    to_archive = df.loc[~keep_mask, _CSV_FIELDNAMES]
+    if not to_archive.empty:
+        try:
+            archive_path = _archive_path_for(csv_path)
+            file_exists = os.path.exists(archive_path)
+            to_archive.to_csv(archive_path, mode="a", index=False, header=not file_exists)
+        except Exception:
+            # Nie udało się zarchiwizować - NIE tnij pliku roboczego, żeby
+            # nie stracić danych, których nigdzie nie zdążyliśmy zapisać.
+            return
+
     try:
         df.loc[keep_mask, _CSV_FIELDNAMES].to_csv(csv_path, index=False)
     except Exception:
-        pass  # sprzątanie CSV to wygoda, nie krytyczna ścieżka
+        pass  # sprzątanie pliku roboczego to wygoda, nie krytyczna ścieżka
 
 
 def _autosave_forecast_to_csv(csv_path: str, station: str, issue_date_str: str, rows: list[dict]) -> None:
