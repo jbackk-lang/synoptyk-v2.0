@@ -199,6 +199,64 @@ def _fetch_historical(lat: float, lon: float, days_back: int) -> pd.DataFrame:
     return df
 
 
+def _load_csv_history_fallback(csv_path: str, station: str) -> pd.DataFrame | None:
+    """Awaryjne zastępstwo dla _fetch_historical(), gdy Open-Meteo (żywe LUB
+    archiwalne API) nie odpowiada - np. serwer padł, sieć padła, limit
+    zapytań. Zamiast całkowicie tracić stację w tabeli, buduje "historię"
+    z tego, co już jest zapisane w krakow_forecast_snapshots.csv dla tej
+    stacji (Twoje wklejone pulle - prognozy własne i/lub realne obserwacje).
+
+    To NIE jest to samo co godzinowe archiwum Open-Meteo - tu mamy najwyżej
+    jeden wiersz na dzień (dobowe min/śr/max, nie 24 punkty), więc dalsze
+    kroki (filtr falkowy, SynoptykV4) dostają dużo uboższy sygnał. Traktować
+    jako "lepsze niż nic w razie awarii", nie jako pełnoprawny zamiennik.
+
+    Bierze wszystkie wiersze dla stacji z target_date < dziś (żeby nie
+    mieszać już-wpisanych PROGNOZ na przyszłość z historią), niezależnie od
+    kolumny `source` (real/prognoza) - im więcej punktów, tym stabilniejszy
+    trend, a i tak nie wiadomo z góry, co akurat będzie w CSV w chwili
+    awarii. Zwraca None, jeśli zebrało się mniej niż 2 dni (SynoptykV4.forecast
+    wymaga minimum 2 punktów - patrz _own_trend_points)."""
+    try:
+        df = pd.read_csv(csv_path, dtype={"source": str})
+    except Exception:
+        return None
+
+    sub = df[df["station"] == station].copy()
+    if sub.empty:
+        return None
+
+    sub["target_date"] = pd.to_datetime(sub["target_date"], errors="coerce")
+    sub = sub.dropna(subset=["target_date"])
+    sub = sub[sub["target_date"].dt.date < date.today()]
+    if sub.empty:
+        return None
+
+    # jeśli dla tego samego dnia jest kilka pulli, bierz ostatni (najnowszy
+    # zapis) - jak przy parowaniu z rzeczywistością gdzie indziej w projekcie
+    sub = sub.sort_values("target_date").drop_duplicates("target_date", keep="last")
+    sub = sub.set_index("target_date")
+
+    out = pd.DataFrame({
+        "temp":     sub["avg_temp_c"],
+        # CSV ma już osobne dobowe min/max (w odróżnieniu od godzinowego
+        # df_hist z Open-Meteo, gdzie min/max liczy się przez resample.min/
+        # max na jednej kolumnie "temp") - patrz _own_trend_points, które
+        # jeśli znajdzie "temp_min"/"temp_max" bezpośrednio, użyje ich
+        # zamiast (bezsensownego dla już-dobowych danych) agregowania
+        # pojedynczej wartości "temp" jako min/max samej siebie.
+        "temp_min": sub["min_temp_c"],
+        "temp_max": sub["max_temp_c"],
+        "precip":   sub["precip_mm"],
+        "pressure": sub["pressure_hpa"],
+        "wind":     sub["wind_kmh"],
+    }).dropna(subset=["temp"], how="all")
+
+    if len(out) < 2:
+        return None
+    return out
+
+
 def _adapt_for_timdr(df_hist: pd.DataFrame) -> pd.DataFrame:
     """Dostosowuje df_hist (indeks czasowy, kolumna 'wind') do formatu, jakiego
     oczekują TIMDRAnalyzer/WindAnalyzer (kolumna 'datetime', kolumna
@@ -280,19 +338,36 @@ def _own_trend_points(df_hist: pd.DataFrame, col: str, how: str, steps_ahead: in
     kilka razy dziennie (patrz _blend_weight niżej i komentarz w
     run_simulation przy `w = _blend_weight(...)`).
 
-    how: "mean" | "min" | "max" — jak agregować godzinowe dane do dziennych
-    przed ekstrapolacją (żeby np. dla temp_min ekstrapolować trend samych
-    dobowych minimów, nie średnich).
+    how: "mean" | "min" | "max" | "sum" — jak agregować godzinowe dane do
+    dziennych przed ekstrapolacją (żeby np. dla temp_min ekstrapolować trend
+    samych dobowych minimów, nie średnich; "sum" dla opadu - suma dobowa,
+    nie średnia z godzinowych stawek, inaczej wynik nie ma sensu fizycznego).
     """
-    if not _V4_OK or df_hist is None or col not in df_hist.columns:
+    if not _V4_OK or df_hist is None:
         return None
-    s = df_hist[col].dropna()
-    if how == "min":
-        daily = s.resample("1D").min().dropna()
-    elif how == "max":
-        daily = s.resample("1D").max().dropna()
-    else:
+    # Fallback z CSV (_load_csv_history_fallback) daje już GOTOWE dobowe
+    # min/max jako osobne kolumny ("temp_min"/"temp_max"), bo tam nie ma
+    # godzinowych danych do samodzielnego agregowania - resample().min()
+    # na jednej już-dobowej wartości "temp" zwróciłoby tylko tę samą
+    # wartość dla min i max. Jeśli taka kolumna istnieje, użyj jej wprost
+    # (resample("1D").mean() jest tu bezpiecznym przepustem dla pojedynczej
+    # wartości na dzień, nie realną agregacją).
+    direct_col = f"{col}_{how}"
+    if direct_col in df_hist.columns:
+        s = df_hist[direct_col].dropna()
         daily = s.resample("1D").mean().dropna()
+    elif col in df_hist.columns:
+        s = df_hist[col].dropna()
+        if how == "min":
+            daily = s.resample("1D").min().dropna()
+        elif how == "max":
+            daily = s.resample("1D").max().dropna()
+        elif how == "sum":
+            daily = s.resample("1D").sum().dropna()
+        else:
+            daily = s.resample("1D").mean().dropna()
+    else:
+        return None
     if len(daily) < 2:
         return None
     try:
@@ -533,7 +608,17 @@ def run_simulation(
             if age_days > 2:
                 logs.append(f"⚠️  {node}: ostatnie dane historyczne z {data_end_str} ({age_days}d temu)!")
         except Exception as e:
-            logs.append(f"⚠️  {node}: błąd pobierania historii: {e}")
+            # Open-Meteo (archive-api) nie odpowiada - próba fallbacku z
+            # krakow_forecast_snapshots.csv zamiast od razu tracić stację.
+            # Patrz _load_csv_history_fallback() po uzasadnienie i ograniczenia.
+            logs.append(f"⚠️  {node}: błąd pobierania historii z Open-Meteo ({e}) - próbuję fallbacku z CSV")
+            df_hist = _load_csv_history_fallback(_SNAPSHOTS_CSV, node)
+            if df_hist is not None:
+                data_end = df_hist.index[-1].date()
+                data_end_str = f"{data_end} (fallback CSV)"
+                logs.append(f"✓  {node}: fallback z CSV aktywny ({len(df_hist)} dni z wklejonych pulli)")
+            else:
+                logs.append(f"✗  {node}: brak wystarczających danych w CSV do fallbacku (min. 2 dni)")
 
         # ── TIMDR (opcjonalnie) ─────────────────────────────────────────────
         # NAPRAWIONE: analyzer.analyze(df_hist) rzucał KeyError('wind_dir')
@@ -613,12 +698,68 @@ def run_simulation(
         own_temp_max = _own_trend_points(df_hist, "temp", "max", forecast_days)
         own_pressure = _own_trend_points(df_hist, "pressure", "mean", forecast_days)
         own_wind     = _own_trend_points(df_hist, "wind", "max", forecast_days)
+        # DODANE: tylko na wypadek awarii Open-Meteo (patrz blok "PAD SERWERA"
+        # niżej) - w normalnym mieszaniu opad celowo NIE dostaje własnego
+        # trendu (patrz _blend_weight: "nie dotyczy opadów"), bo trend liniowy
+        # nie pasuje do zjawiska progowego. Tu to ostatnia deska ratunku, więc
+        # lepsze przybliżenie niż całkowity brak wiersza.
+        own_precip   = _own_trend_points(df_hist, "precip", "sum", forecast_days)
 
         # ── prognoza Open-Meteo ─────────────────────────────────────────────
         try:
             df_fc = _fetch_forecast(lat, lon, forecast_days)
             daily = _daily_stats(df_fc)
+        except Exception as e:
+            # PAD SERWERA: żywe Open-Meteo Forecast API nie odpowiada. Zamiast
+            # tracić całą stację (jak wcześniej - "✗ błąd prognozy", zero
+            # wierszy), budujemy wiersze z tego, co już policzone wyżej z
+            # REALNEJ historii (own_temp_*/own_pressure/own_wind/own_precip -
+            # z krakow_forecast_snapshots.csv, jeśli i żywe archiwum też padło,
+            # patrz _load_csv_history_fallback). Wyraźnie oznaczone w "Typ",
+            # bez korekty obciążenia/EV/▲ - te mechanizmy porównują się do
+            # normalnych pulli z API, więc nie mają tu sensownego punktu
+            # odniesienia.
+            logs.append(f"✗  {node}: błąd prognozy z Open-Meteo ({e}) - próbuję fallbacku z realnej historii")
+            if own_temp_avg is None:
+                logs.append(f"✗  {node}: brak danych do fallbacku (za mało historii) - stacja pominięta")
+                continue
+            today = date.today()
+            n = forecast_days
+            for day_idx in range(n):
+                day_label = today + timedelta(days=day_idx)
+                day_text = "Dziś" if day_idx == 0 else f"{day_idx + 1}d"
+                t_avg = round(float(own_temp_avg[day_idx]), 1) if day_idx < len(own_temp_avg) else None
+                t_min = round(float(own_temp_min[day_idx]), 1) if own_temp_min is not None and day_idx < len(own_temp_min) else t_avg
+                t_max = round(float(own_temp_max[day_idx]), 1) if own_temp_max is not None and day_idx < len(own_temp_max) else t_avg
+                press = round(float(own_pressure[day_idx]), 1) if own_pressure is not None and day_idx < len(own_pressure) else None
+                wind  = round(float(own_wind[day_idx]), 1) if own_wind is not None and day_idx < len(own_wind) else None
+                precip = round(max(0.0, float(own_precip[day_idx])), 1) if own_precip is not None and day_idx < len(own_precip) else None
+                v4_str = "–"
+                if v4_forecast is not None and day_idx < len(v4_forecast["point"]):
+                    v4_point = round(float(v4_forecast["point"][day_idx]), 1)
+                    v4_lower = round(float(v4_forecast["lower"][day_idx]), 1)
+                    v4_upper = round(float(v4_forecast["upper"][day_idx]), 1)
+                    v4_str = f"{v4_point} [{v4_lower}–{v4_upper}]"
+                def _na(v):
+                    return "–" if v is None else v
+                rows.append({
+                    "Stacja":   node,
+                    "Data":     str(day_label),
+                    "Typ":      f"⚠️FB {day_text}",
+                    "Min °C":   _na(t_min),
+                    "Śr °C":    _na(t_avg),
+                    "Max °C":   _na(t_max),
+                    "Opad mm":  _na(precip),
+                    "Ciśn hPa": _na(press),
+                    "Wiatr km/h": _na(wind),
+                    "Kier.":    "–",
+                    "Hist. do": data_end_str,
+                    "V4 °C":    v4_str,
+                })
+            logs.append(f"⚠️  {node}: {n} wierszy z fallbacku (⚠️FB w kolumnie Typ) - to NIE jest świeża prognoza Open-Meteo")
+            continue
 
+        try:
             for day_idx, (day_dt, row_s) in enumerate(daily.iterrows()):
                 day_label = day_dt.date()
                 # napis "Dziś / 2d / 3d / ... / 14d"

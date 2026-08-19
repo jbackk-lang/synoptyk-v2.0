@@ -109,6 +109,8 @@ synoptyk-v2.0/
 
 Tabela wyników zawiera kolumny: `Stacja` (nazwa miasta, ewentualnie z dopiskiem `⚡EV`), `Data`, `Typ` (Dziś/2d/3d/…/14d), `Min °C`, `Śr °C`, `Max °C`, `Opad mm`, `Ciśn hPa`, `Wiatr km/h`, `Kier.`, `Hist. do`, `V4 °C`.
 
+**Fallback przy padzie Open-Meteo**: jeśli żywe API (prognoza i/lub archiwum historyczne) nie odpowiada, silnik nie pomija stacji — liczy dalej na podstawie tego, co już jest zapisane dla tej stacji w `krakow_forecast_snapshots.csv` (Twoje wcześniej wklejone pulle). Takie wiersze mają w kolumnie `Typ` dopisek `⚠️FB` zamiast zwykłego znaczka korekty/dnia i nie dostają korekty obciążenia ani oznaczeń `▲`/`⚡EV` (nie mają sensownego punktu odniesienia w normalnym pipeline'ie). Jeśli dla danej stacji w CSV jest za mało danych (< 2 dni), stacja jest pomijana z komunikatem w Dzienniku — tak jak wcześniej. To osobny mechanizm od `Tryb Demo` (patrz niżej): Demo zawsze pokazuje same „–", fallback pokazuje realne liczby z historii.
+
 **Tryb „Wybór miast”** — dowolna kombinacja miast z listy (`gr.Dropdown(multiselect=True)`), niezależna od sztywnych grup w `REGIONS_MAP` (np. Kraków + Gdańsk + Warszawa naraz, mimo że są w trzech różnych regionach). Pusty wybór daje fallback na `Krakow_Centrum` z ostrzeżeniem w Dzienniku. Domyślny tryb startowy to jednak `Pojedyncze miasto`/`Krakow_Centrum` — przy trybie „Cały Region” (do 7 stacji × 14 dni = do 98 wierszy) trzeba przewijać tabelę, żeby zobaczyć wszystkie stacje.
 
 **Kolumna `Typ`** łączy znaczek korekty obciążenia (🔴/🟠/🟢) i dzień (`Dziś`/`2d`/`3d`/…/`14d`). Skok głównego silnika (`⚡EV`) jest dopisywany do nazwy stacji w kolumnie `Stacja` (np. `Krakow_Centrum ⚡EV`), wyrównanej do prawej strony komórki.
