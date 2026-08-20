@@ -33,7 +33,7 @@ if %ERRORLEVEL% EQU 0 (
     echo         bedzie odpowiadal w przegladarce, nie ten skrypt:
     netstat -ano | findstr ":8010"
     echo         Ostatnia liczba w linii to PID procesu. Sprawdz go w
-    echo         Menedzerze zadan (zakladka Szczegoly) i zamknij, albo
+    echo         Menedzerze zadan ^(zakladka Szczegoly^) i zamknij, albo
     echo         zmien port w tym pliku ^(run_api.bat^) na inny.
     echo.
     pause
