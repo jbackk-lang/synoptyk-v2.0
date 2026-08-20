@@ -28,7 +28,7 @@ python gui_app.py
 # GUI dostępne pod http://127.0.0.1:7860
 ```
 
-> **Windows:** zamiast ostatniej linii uruchom `run.bat` — jedno okno konsoli, przeglądarka otwiera się sama pod `http://127.0.0.1:7860` (`app.launch(..., inbrowser=True)`). Osobny serwer API (FastAPI/Uvicorn, `http://127.0.0.1:8000/docs`) GUI nie potrzebuje — jeśli jest potrzebny do czegoś innego, uruchamia się go osobno przez `run_api.bat`.
+> **Windows:** zamiast ostatniej linii uruchom `run.bat` — jedno okno konsoli, przeglądarka otwiera się sama pod `http://127.0.0.1:7860` (`app.launch(..., inbrowser=True)`). Osobny serwer API (FastAPI/Uvicorn, `http://127.0.0.1:8010/docs`) GUI nie potrzebuje — jeśli jest potrzebny do czegoś innego, uruchamia się go osobno przez `run_api.bat` (port zmieniony z 8000 na 8010, żeby uniknąć kolizji z innymi lokalnymi serwerami, które często domyślnie siedzą na 8000).
 
 ---
 
