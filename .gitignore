@@ -1,0 +1,8 @@
+weather_cache.db
+data/*.db
+*.db
+__pycache__/
+*.pyc
+.env
+_last_pull_cache.json
+.pytest_cache/
