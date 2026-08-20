@@ -11,6 +11,19 @@ from synoptyk.trend import trend
 app = FastAPI(title="Synoptyk API v2.0")
 
 
+@app.get("/")
+def root():
+    # DODANE: bez tego GET / zwracał 404 (FastAPI nie ma domyślnego
+    # endpointu na "/") - ktoś wchodzący pod sam adres bazowy w
+    # przeglądarce (bez /docs czy /api/...) dostawał niepotrzebnie
+    # niepokojący błąd, mimo że serwer działał poprawnie.
+    return {
+        "app": "Synoptyk API v2.0",
+        "docs": "/docs",
+        "endpoints": ["/api/regions", "/api/forecast?region=<klucz_regionu>"],
+    }
+
+
 @app.get("/api/regions")
 def get_regions():
     return REGIONS
