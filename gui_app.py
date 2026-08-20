@@ -1517,9 +1517,7 @@ if __name__ == "__main__":
     # zmianą w run.bat (osobny serwer API przeniesiony do run_api.bat,
     # nieuruchamiany domyślnie) - jedno okno terminala + jedna karta
     # przeglądarki, otwierana sama, zamiast dwóch okien konsoli i
-    # ręcznego wpisywania adresu (patrz analizator-gieldowy-v3/run.bat -
-    # ten sam wzorzec jednego okna, na wzór którego o to poprosił
-    # użytkownik).
+    # ręcznego wpisywania adresu (na to poprosił użytkownik).
     try:
         app.launch(server_name="127.0.0.1", server_port=7860, theme=_THEME, css=_CSS, inbrowser=True)
     except TypeError:

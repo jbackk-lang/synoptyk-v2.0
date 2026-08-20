@@ -59,7 +59,7 @@ if not exist "gui_app.py" (
 :: w ogole sie do tego API nie odwoluje (potwierdzone w kodzie - GUI
 :: pobiera dane bezposrednio z Open-Meteo), wiec to okno bylo zbednym
 :: baalastem dla kogos, kto chce tylko GUI. Uzytkownik poprosil o
-:: uruchamianie jednym oknem, tak jak analizator-gieldowy-v3/run.bat.
+:: uruchamianie jednym oknem.
 :: Przegladarka otwiera sie juz sama (gui_app.py: app.launch(...,
 :: inbrowser=True)) - nie trzeba tego robic tutaj. Kto potrzebuje osobno
 :: dzialajacego API/Swagger (http://127.0.0.1:8000/docs), uruchamia
