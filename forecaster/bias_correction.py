@@ -30,7 +30,12 @@ import pandas as pd
 # pominięte — to inny dostawca, służy do osobnej osi porównania (patrz
 # README: "Synoptyk vs rzeczywistość" ORAZ "Synoptyk vs prognoza
 # dostawcy" to dwie różne, nie mieszane ze sobą osie).
-_REAL_SOURCE_PREFIXES = ("IMGW_real", "web_szukaj")
+# "OpenMeteo_real" DODANE 2026-08-22: automatyczne uzupełnianie z
+# gui_app.py::_backfill_real_observations (Open-Meteo Archive API, dobowe
+# maksimum) — ręczne wpisy IMGW_real_*/web_szukaj_* ustały 2026-08-19 i nie
+# miały następcy, bias_correction przestał dostawać świeże pary. Ten nowy
+# prefiks działa RAZEM ze starymi, nie zamiast nich.
+_REAL_SOURCE_PREFIXES = ("IMGW_real", "web_szukaj", "OpenMeteo_real")
 _FORECAST_SOURCE_PREFIX = "prognoza"
 
 
