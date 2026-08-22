@@ -322,6 +322,93 @@ def _prune_old_csv_rows(csv_path: str, keep_days: int = _CSV_RETENTION_DAYS) -> 
         pass  # sprzątanie pliku roboczego to wygoda, nie krytyczna ścieżka
 
 
+_REAL_BACKFILL_SOURCE = "OpenMeteo_real_dailymax"
+_REAL_BACKFILL_LOOKBACK_DAYS = 14
+
+
+def _backfill_real_observations(csv_path: str, station: str, lat: float, lon: float,
+                                 lookback_days: int = _REAL_BACKFILL_LOOKBACK_DAYS) -> None:
+    """Uzupełnia RZECZYWISTE obserwacje (nie prognozy) dla dni, które już
+    minęły, a nie mają jeszcze żadnego wiersza source~real (IMGW_real_*/
+    web_szukaj_*/OpenMeteo_real_*) w CSV — żeby bias_correction.py miał
+    świeże pary (prognoza, rzeczywistość) BEZ ręcznego dopisywania, tak jak
+    dotąd (te ręczne wpisy ustały 2026-08-19 — stąd ta funkcja).
+
+    Źródło: Open-Meteo Archive API przez _fetch_historical() (już używane
+    wyżej w tym pliku do historii godzinowej — ta sama, sprawdzona ścieżka
+    HTTP, nie nowa zależność). Agregacja do jednego wiersza dziennego:
+    `max_temp_c` = dobowe MAKSIMUM z 24 odczytów godzinowych (kolumna
+    `max_temp_c`, zgodnie z konwencją reszty CSV — patrz
+    forecaster/bias_correction.py, gdzie real to "pojedynczy odczyt
+    punktowy"; tu to dobowe maksimum, więc bardziej spójne, nie mniej).
+    `precip_mm` = suma dobowa, `pressure_hpa`/`wind_kmh` = średnia dobowa.
+
+    source="OpenMeteo_real_dailymax" — NOWY prefiks, dopisany do
+    `bias_correction._REAL_SOURCE_PREFIXES`, używany RAZEM ze starymi
+    IMGW_real/web_szukaj, nie zamiast nich (stare wpisy zostają jak są).
+
+    Wywoływane automatycznie przy każdym uruchomieniu GUI (patrz miejsce
+    wywołania w run_simulation, obok _autosave_forecast_to_csv) — nie
+    wymaga ręki. Failuje cicho (Open-Meteo bywa niedostępne) — to wygoda,
+    nie krytyczna ścieżka; przy następnym uruchomieniu spróbuje ponownie."""
+    try:
+        existing = pd.read_csv(csv_path, dtype={"source": str})
+    except Exception:
+        existing = pd.DataFrame(columns=_CSV_FIELDNAMES)
+
+    today = date.today()
+    already_covered: set[str] = set()
+    if not existing.empty and "source" in existing.columns:
+        real_mask = existing["source"].astype(str).str.startswith(
+            ("IMGW_real", "web_szukaj", "OpenMeteo_real"), na=False)
+        covered = existing.loc[(existing["station"] == station) & real_mask, "target_date"]
+        already_covered = set(covered.astype(str))
+
+    missing_dates = [
+        today - timedelta(days=back)
+        for back in range(1, lookback_days + 1)
+        if str(today - timedelta(days=back)) not in already_covered
+    ]
+    if not missing_dates:
+        return  # nic do uzupełnienia - wszystkie dni w oknie już mają realny wiersz
+
+    try:
+        df_hist = _fetch_historical(lat, lon, days_back=lookback_days + 1)
+    except Exception:
+        return  # Open-Meteo niedostępne teraz - spróbujemy przy kolejnym uruchomieniu
+
+    new_rows = []
+    for d in missing_dates:
+        day_data = df_hist[df_hist.index.date == d]
+        if day_data.empty:
+            continue  # archiwum jeszcze nie ma tego dnia (np. dziś, dane niepełne) - pomiń, nie zgaduj
+        new_rows.append({
+            "station": station, "target_date": str(d), "issue_date": "",
+            "pull_seq": "", "lead_days": "", "min_temp_c": "", "avg_temp_c": "",
+            "max_temp_c": round(float(day_data["temp"].max()), 1),
+            "precip_mm": round(float(day_data["precip"].sum()), 1),
+            "pressure_hpa": round(float(day_data["pressure"].mean()), 1),
+            "wind_kmh": round(float(day_data["wind"].mean()), 1),
+            "source": _REAL_BACKFILL_SOURCE,
+            "v4_point_c": "", "v4_lower_c": "", "v4_upper_c": "",
+        })
+    if not new_rows:
+        return
+
+    try:
+        file_exists = os.path.exists(csv_path)
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=_CSV_FIELDNAMES)
+            if not file_exists:
+                w.writeheader()
+            for r in new_rows:
+                w.writerow(r)
+    except Exception:
+        return  # dopisanie realnych obserwacji to wygoda, nie krytyczna ścieżka
+
+    _prune_old_csv_rows(csv_path)
+
+
 def _autosave_forecast_to_csv(csv_path: str, station: str, issue_date_str: str, rows: list[dict]) -> None:
     """Dopisuje WŁASNĄ prognozę (dokładnie te same liczby, co trafiają do
     tabeli GUI - po korekcie UHI/falkowej/blendingu/obciążenia, PRZED
@@ -1044,6 +1131,15 @@ def run_simulation(
             # nie wywołują tego (fallback sam pochodzi z CSV, dopisywanie
             # byłoby kołowe; Demo to gołe "–", nic sensownego do zapisania).
             _autosave_forecast_to_csv(_SNAPSHOTS_CSV, node, str(date.today()), own_pull_rows)
+
+            # DODANE: automatyczne uzupełnienie RZECZYWISTYCH obserwacji za
+            # dni, które już minęły (patrz _backfill_real_observations() po
+            # pełne uzasadnienie - ręczne wpisy IMGW_real_*/web_szukaj_*
+            # ustały 2026-08-19, bias_correction.py przestał dostawać nowe
+            # pary do porównania). Ta sama ścieżka HTTP co _fetch_historical
+            # wyżej, więc nic nowego sieciowo - tylko dopisanie brakujących
+            # dni jako osobny wiersz per stacja.
+            _backfill_real_observations(_SNAPSHOTS_CSV, node, lat, lon)
 
         except Exception as e:
             logs.append(f"✗  {node}: błąd prognozy: {e}")
