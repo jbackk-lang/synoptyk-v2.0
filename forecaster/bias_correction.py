@@ -30,11 +30,16 @@ import pandas as pd
 # pominięte — to inny dostawca, służy do osobnej osi porównania (patrz
 # README: "Synoptyk vs rzeczywistość" ORAZ "Synoptyk vs prognoza
 # dostawcy" to dwie różne, nie mieszane ze sobą osie).
-_REAL_SOURCE_PREFIXES = ("IMGW_real", "web_szukaj")
+# "OpenMeteo_real" DODANE 2026-08-22: automatyczne uzupełnianie z
+# gui_app.py::_backfill_real_observations (Open-Meteo Archive API, dobowe
+# maksimum) — ręczne wpisy IMGW_real_*/web_szukaj_* ustały 2026-08-19 i nie
+# miały następcy, bias_correction przestał dostawać świeże pary. Ten nowy
+# prefiks działa RAZEM ze starymi, nie zamiast nich.
+_REAL_SOURCE_PREFIXES = ("IMGW_real", "web_szukaj", "OpenMeteo_real")
 _FORECAST_SOURCE_PREFIX = "prognoza"
 
 
-def _load_pairs(csv_path: str, station: str | None = None) -> pd.DataFrame:
+def _load_pairs(csv_path: str, station: str | None = None, forecast_col: str = "avg_temp_c") -> pd.DataFrame:
     """Wczytuje CSV i zwraca pary (lead_days, forecast, real) dla każdego
     target_date, gdzie mamy zarówno prognozę, jak i późniejszy pomiar
     rzeczywisty.
@@ -46,6 +51,15 @@ def _load_pairs(csv_path: str, station: str | None = None) -> pd.DataFrame:
     co jest niedoskonałe (punkt w czasie vs średnia dobowa) i wprowadza
     własny szum do oszacowania obciążenia — to dodatkowy powód na
     stosunkowo wysoki domyślny próg `min_samples` w `compute_lead_bias()`.
+
+    DODANE: `forecast_col` - pozwala liczyć te same pary dla innej kolumny
+    prognozy niż domyślna `avg_temp_c` (głównego, mieszanego silnika).
+    Konkretnie: `v4_point_c` (samodzielny punkt SynoptykV4, dodany do CSV
+    razem z `v4_lower_c`/`v4_upper_c` - patrz DODANE w gui_app.py przy
+    `_fetch_forecast`) - żeby móc policzyć bias/MAE osobno dla V4 i
+    faktycznie porównać oba tory z rzeczywistością, nie tylko między sobą.
+    Wiersze sprzed tej zmiany mają puste `v4_point_c` - te po prostu nie
+    wejdą do wyniku (pd.isna), nie trzeba nic dodatkowo obsługiwać.
     """
     df = pd.read_csv(csv_path, dtype={"source": str})
     if station is not None:
@@ -65,17 +79,22 @@ def _load_pairs(csv_path: str, station: str | None = None) -> pd.DataFrame:
         real_val = real_by_date.get(r["target_date"])
         if real_val is None or pd.isna(real_val):
             continue
-        if pd.isna(r.get("avg_temp_c")) or pd.isna(r.get("lead_days")):
+        if forecast_col not in r or pd.isna(r.get(forecast_col)) or pd.isna(r.get("lead_days")):
             continue
         rows.append({
             "lead_days": int(r["lead_days"]),
-            "forecast": float(r["avg_temp_c"]),
+            "forecast": float(r[forecast_col]),
             "real": float(real_val),
         })
     return pd.DataFrame(rows)
 
 
-def compute_lead_bias(csv_path: str, station: str | None = None, min_samples: int = 5) -> dict[int, dict]:
+def compute_lead_bias(
+    csv_path: str,
+    station: str | None = None,
+    min_samples: int = 5,
+    forecast_col: str = "avg_temp_c",
+) -> dict[int, dict]:
     """Zwraca {lead_days: {"bias": ..., "mae": ..., "n": ...}} TYLKO dla
     lead_days z >= min_samples sparowanymi obserwacjami. Brak wpisu dla
     danego lead_days = brak korekty (za mało danych, NIE zakłada się zera).
@@ -83,9 +102,12 @@ def compute_lead_bias(csv_path: str, station: str | None = None, min_samples: in
     Jeśli plik CSV nie istnieje albo jest pusty/uszkodzony — zwraca pusty
     słownik (brak korekty), nie rzuca wyjątku; to ma być bezpieczny dodatek
     do prognozy, nie kolejny punkt awarii.
+
+    `forecast_col` - patrz `_load_pairs()`; użyj `"v4_point_c"`, żeby
+    policzyć bias/MAE dla samodzielnego toru V4 zamiast głównego.
     """
     try:
-        pairs = _load_pairs(csv_path, station=station)
+        pairs = _load_pairs(csv_path, station=station, forecast_col=forecast_col)
     except Exception:
         return {}
 
