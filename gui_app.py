@@ -1614,7 +1614,55 @@ if __name__ == "__main__":
     # nieuruchamiany domyślnie) - jedno okno terminala + jedna karta
     # przeglądarki, otwierana sama, zamiast dwóch okien konsoli i
     # ręcznego wpisywania adresu (na to poprosił użytkownik).
+    # NAPRAWIONE: port był na sztywno wpisany (7860), więc jeśli był już
+    # zajęty (np. druga uruchomiona instancja, albo inny program na tym
+    # porcie), app.launch() rzucał nieobsłużony OSError - traceback i
+    # natychmiastowe zamknięcie procesu. To dokładnie zgłoszony objaw
+    # "wywala okienko" / "konsola się zamyka": run.bat próbował wcześniej
+    # sam znaleźć wolny port (pętla z heredokiem `python - <<EOF`), ale
+    # ta składnia jest z basha/POSIX-a, nie z Windows cmd.exe - w cmd
+    # `<<EOF` nie jest obsługiwane i powoduje błąd parsowania, który może
+    # ubić całe okno konsoli, ZANIM `python gui_app.py` w ogóle się
+    # uruchomi. Do tego GRADIO_SERVER_PORT ustawiane przez ten fragment
+    # run.bat i tak nie było tu nigdzie odczytywane - port był zawsze
+    # 7860 niezależnie od tego, co ustawił .bat. Naprawiono oba problemy:
+    # szukanie wolnego portu przeniesione tutaj, do Pythona (prostsze,
+    # przenośne, faktycznie połączone z app.launch()).
+    def _find_free_port(preferred=7860, span=40):
+        import socket
+        candidates = [preferred] + list(range(preferred + 1, preferred + span))
+        env_port = os.environ.get("GRADIO_SERVER_PORT")
+        if env_port:
+            try:
+                candidates = [int(env_port)] + candidates
+            except ValueError:
+                pass
+        for p in candidates:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.bind(("127.0.0.1", p))
+                s.close()
+                return p
+            except OSError:
+                s.close()
+                continue
+        return None
+
+    _port = _find_free_port(7860)
+    if _port is None:
+        print("[BŁĄD] Nie znaleziono wolnego portu w zakresie 7860-7900.")
+        print("Zamknij inne uruchomione instancje Synoptyka albo zwolnij port ręcznie.")
+        input("Naciśnij Enter, aby zamknąć...")
+        raise SystemExit(1)
+
+    print(f"[OK] Uruchamianie GUI na porcie {_port}...")
     try:
-        app.launch(server_name="127.0.0.1", server_port=7860, theme=_THEME, css=_CSS, inbrowser=True)
+        app.launch(server_name="127.0.0.1", server_port=_port, theme=_THEME, css=_CSS, inbrowser=True)
     except TypeError:
-        app.launch(server_name="127.0.0.1", server_port=7860, inbrowser=True)
+        app.launch(server_name="127.0.0.1", server_port=_port, inbrowser=True)
+    except OSError as e:
+        # ostatnia linia obrony - gdyby port zdążył zostać zajęty między
+        # sprawdzeniem a launch() (wyścig, rzadkie, ale możliwe)
+        print(f"[BŁĄD] Nie udało się uruchomić serwera na porcie {_port}: {e}")
+        input("Naciśnij Enter, aby zamknąć...")
+        raise
