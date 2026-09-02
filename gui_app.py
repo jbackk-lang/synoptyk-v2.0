@@ -345,10 +345,19 @@ def _backfill_real_observations(csv_path: str, station: str, lat: float, lon: fl
     Źródło: Open-Meteo Archive API przez _fetch_historical() (już używane
     wyżej w tym pliku do historii godzinowej — ta sama, sprawdzona ścieżka
     HTTP, nie nowa zależność). Agregacja do jednego wiersza dziennego:
-    `max_temp_c` = dobowe MAKSIMUM z 24 odczytów godzinowych (kolumna
-    `max_temp_c`, zgodnie z konwencją reszty CSV — patrz
-    forecaster/bias_correction.py, gdzie real to "pojedynczy odczyt
-    punktowy"; tu to dobowe maksimum, więc bardziej spójne, nie mniej).
+    `max_temp_c` = dobowe MAKSIMUM z 24 odczytów godzinowych.
+
+    NAPRAWIONE: wcześniej `min_temp_c`/`avg_temp_c` real-wiersza zostawały
+    PUSTE, a `forecaster/bias_correction.py` i tak parował realne
+    `max_temp_c` z prognozowanym `avg_temp_c` - strukturalne niedopasowanie
+    (dobowe maksimum >= dobowa średnia, z definicji, zwykle kilka stopni w
+    lecie), które samo w sobie zawyżało zmierzony bias/MAE niezależnie od
+    jakości modelu (patrz analiza w HISTORIA_BUDOWY.md). Teraz wypełniamy
+    WSZYSTKIE trzy z tego samego godzinowego archiwum: `min_temp_c` =
+    dobowe minimum, `avg_temp_c` = dobowa średnia, `max_temp_c` = dobowe
+    maksimum - żeby `compute_lead_bias(forecast_col="avg_temp_c",
+    real_col="avg_temp_c")` (i analogicznie dla min/max) porównywało
+    "jabłka z jabłkami", nie średnią z maksimum.
     `precip_mm` = suma dobowa, `pressure_hpa`/`wind_kmh` = średnia dobowa.
 
     source="OpenMeteo_real_dailymax" — NOWY prefiks, dopisany do
@@ -392,7 +401,9 @@ def _backfill_real_observations(csv_path: str, station: str, lat: float, lon: fl
             continue  # archiwum jeszcze nie ma tego dnia (np. dziś, dane niepełne) - pomiń, nie zgaduj
         new_rows.append({
             "station": station, "target_date": str(d), "issue_date": "",
-            "pull_seq": "", "lead_days": "", "min_temp_c": "", "avg_temp_c": "",
+            "pull_seq": "", "lead_days": "",
+            "min_temp_c": round(float(day_data["temp"].min()), 1),
+            "avg_temp_c": round(float(day_data["temp"].mean()), 1),
             "max_temp_c": round(float(day_data["temp"].max()), 1),
             "precip_mm": round(float(day_data["precip"].sum()), 1),
             "pressure_hpa": round(float(day_data["pressure"].mean()), 1),
@@ -980,17 +991,37 @@ def run_simulation(
         # Kod SAM raportuje, dla ilu lead_days ma wystarczajaco probek -
         # zeby bylo widac w Dzienniku, czy korekta w ogole dziala, a nie
         # zeby cicho cos poprawiala bez informacji z ilu danych to wynika.
-        bias_table: dict = {}
+        #
+        # NAPRAWIONE: dawniej JEDNA bias_table, licząca prognozowaną
+        # ŚREDNIĄ (avg_temp_c) vs realne MAKSIMUM (max_temp_c,
+        # _backfill_real_observations) - niedopasowanie kolumn zawyżało
+        # zmierzony bias niezależnie od jakości modelu (patrz
+        # bias_correction._load_pairs, sekcja NAPRAWIONE). Teraz TRZY
+        # tabele, każda parująca odpowiadającą kolumnę prognozy z
+        # odpowiadającą kolumną rzeczywistości (avg<->avg, min<->min,
+        # max<->max) - stosowane niżej osobno do t_avg/t_min/t_max.
+        bias_tables: dict[str, dict] = {"avg": {}, "min": {}, "max": {}}
         if _BIAS_OK:
-            bias_table = compute_lead_bias(_SNAPSHOTS_CSV, station=node, min_samples=5)
+            for _key, _col in (("avg", "avg_temp_c"), ("min", "min_temp_c"), ("max", "max_temp_c")):
+                bias_tables[_key] = compute_lead_bias(
+                    _SNAPSHOTS_CSV, station=node, min_samples=5,
+                    forecast_col=_col, real_col=_col,
+                )
+            bias_table = bias_tables["avg"]  # wstecznie: _bias_badge/log niżej nadal patrzą na tor "avg"
             if bias_table:
                 summary = ", ".join(
                     f"+{lead}d(n={e['n']},{e['bias']:+.1f}°C)"
                     for lead, e in sorted(bias_table.items())
                 )
-                logs.append(f"🎯 {node}: korekta obciążenia aktywna dla: {summary}")
+                logs.append(f"🎯 {node}: korekta obciążenia (Śr °C) aktywna dla: {summary}")
             else:
-                logs.append(f"🎯 {node}: korekta obciążenia jeszcze nieaktywna (za mało sparowanych pulli w CSV, próg 5/lead_days)")
+                logs.append(f"🎯 {node}: korekta obciążenia (Śr °C) jeszcze nieaktywna (za mało sparowanych pulli w CSV, próg 5/lead_days)")
+            for _key, _label in (("min", "Min °C"), ("max", "Max °C")):
+                if bias_tables[_key]:
+                    n_leads = len(bias_tables[_key])
+                    logs.append(f"🎯 {node}: korekta obciążenia ({_label}) aktywna dla {n_leads} lead_days")
+        else:
+            bias_table = {}
 
         if offline_demo:
             today = date.today()
@@ -1263,8 +1294,21 @@ def run_simulation(
                 # nim (nie odwrotnie) - kółka stoją w jednej kolumnie po
                 # lewej krawędzi komórki niezależnie od długości "Dziś" vs
                 # "+13d", więc łatwiej je od razu wyłapać wzrokiem w dół tabeli.
-                if day_idx in bias_table:
-                    t_avg = apply_bias_correction(t_avg, day_idx, bias_table)
+                # DODANE: zapamiętanie wartości RAW (przed korektą obciążenia)
+                # - patrz NAPRAWIONE przy own_pull_rows.append() niżej: to
+                # własny surowy wynik modelu idzie do CSV/treningu kolejnych
+                # bias_tables, NIE wartość już skorygowana. Bez tego
+                # compute_lead_bias uczyłby się na swoim własnym już
+                # poprawionym wyjściu z poprzednich pulli (circularity) -
+                # bias mierzony na całej historii CSV byłby resztkowym
+                # błędem PO korekcie, nie surowym błędem modelu.
+                t_min_raw, t_avg_raw, t_max_raw = t_min, t_avg, t_max
+                if day_idx in bias_tables["avg"]:
+                    t_avg = apply_bias_correction(t_avg, day_idx, bias_tables["avg"])
+                if day_idx in bias_tables["min"]:
+                    t_min = apply_bias_correction(t_min, day_idx, bias_tables["min"])
+                if day_idx in bias_tables["max"]:
+                    t_max = apply_bias_correction(t_max, day_idx, bias_tables["max"])
                 typ = f"{_bias_badge(day_idx, bias_table)} {day_text}"
 
                 # sygnały TIMDR - USUNIĘTE z kolumny "Typ" (był tam "⚡",
@@ -1358,7 +1402,14 @@ def run_simulation(
                 own_pull_rows.append({
                     "target_date": str(day_label),
                     "lead_days": day_idx,
-                    "min_temp_c": t_min, "avg_temp_c": t_avg, "max_temp_c": t_max,
+                    # NAPRAWIONE: RAW (przed korektą obciążenia), nie t_min/
+                    # t_avg/t_max po korekcie - patrz komentarz przy
+                    # t_min_raw/t_avg_raw/t_max_raw wyżej. Tabela GUI
+                    # (rows.append niżej) dalej pokazuje wartość
+                    # SKORYGOWANĄ (najlepsze dostępne oszacowanie) - to
+                    # rozdzielenie "co widzi użytkownik" od "co idzie do
+                    # treningu kolejnych bias_tables" jest całą naprawą.
+                    "min_temp_c": t_min_raw, "avg_temp_c": t_avg_raw, "max_temp_c": t_max_raw,
                     "precip_mm": precip, "pressure_hpa": press, "wind_kmh": wind,
                     "v4_point_c": v4_point if v4_forecast is not None and day_idx < len(v4_forecast["point"]) else "",
                     "v4_lower_c": v4_lower if v4_forecast is not None and day_idx < len(v4_forecast["point"]) else "",
