@@ -23,7 +23,9 @@ Zmiany względem oryginału:
 from __future__ import annotations
 
 import csv
+import html
 import json
+import math
 import os
 import sys
 import warnings
@@ -725,6 +727,203 @@ def detect_engine_volatility(prev_row: dict, new_row: dict) -> dict:
     return flags
 
 
+_CITY_SECTION_COLS = [
+    "Data", "Typ", "Min °C", "Śr °C", "Max °C",
+    "Opad mm", "Ciśn hPa", "Wiatr km/h", "Kier.", "Hist. do", "V4 °C",
+]
+
+
+def _build_city_sections_html(rows: list[dict], nodes: list[str]) -> str:
+    """Sekcja tabela+wykres PER MIASTO - jedna samodzielna karta na stację
+    (nagłówek z nazwą, mała tabelka dni, pod nią wykres pasmowy min/max),
+    w tej samej kolejności co `nodes`.
+
+    DODANE/ZMIENIONE na wyraźną prośbę użytkownika w dwóch krokach:
+    1) "nie mam wykresu synoptycznego jak w arctic, mozesz podzielic tabele
+       tak by pod kazdym miastem byl taki wykres?" - wykres pasmowy jako
+       "ręcznie" rysowane SVG, GEOMETRIA I LOGIKA identyczna z
+       renderForecastOutlook() w SYNOPTYK-ARCTIC/webapp/static/index.html
+       (patrz tamten plik, sekcja "Prognoza 7 dni"): siatka co 6°C
+       zaokrąglona do wielokrotności 6, pasmo min-max jako <polygon>,
+       osobne linie max/min, punkty + etykiety liczbowe, data w formacie
+       DD.MM na osi X.
+    2) "podziel tabele i wykres na miasta moga byc wybierane miasta z menu
+       dodatkowego" - każda karta dostała WŁASNĄ małą tabelkę dni (kolumny
+       `_CITY_SECTION_COLS`, czyli te same co główny `gr.Dataframe` minus
+       "Stacja" - to i tak nagłówek karty), a które miasta się tu w ogóle
+       pokazują steruje osobny dropdown `city_filter` (patrz
+       update_city_filter_view() niżej) - NIE nowe zapytanie sieciowe, tylko
+       filtr/przeukładanie już pobranych `rows` z gr.State.
+
+    Główny `gr.Dataframe` (`table` w create_app()) zostaje RÓWNIEŻ bez zmian
+    - to jest dodatkowa, samodzielna sekcja NAD nim, nie jego zamiana (dalej
+    przydatna np. do sortowania/pełnego ekranu na całym zbiorze na raz).
+
+    Gradio nie tworzy komponentów dynamicznie zależnie od liczby wybranych
+    miast (mode="Wybór miast"/"Cały Region" może dać od 1 do kilkunastu
+    stacji) - stąd jeden komponent HTML z N kartami po kolei, zamiast N
+    osobnych gr.Plot/gr.HTML/gr.Dataframe, co wymagałoby z góry ustalonego
+    limitu i pokazywania/chowania nadmiarowych komponentów.
+
+    Na wykres wchodzą tylko wiersze z LICZBOWYMI "Min °C"/"Max °C" - wiersze
+    trybu DEMO ("–", patrz offline_demo w run_simulation) i inne
+    nienumeryczne wartości są pomijane dla WYKRESU (mała tabelka pod
+    nagłówkiem karty pokazuje je nadal, tak jak są - "–" włącznie); stacja
+    bez ŻADNEGO liczbowego wiersza (np. błąd prognozy dla wszystkich dni)
+    dostaje krótki komunikat tekstowy zamiast pustego/połamanego SVG
+    (dzielenie przez zero przy y_max==y_min jest też osobno zabezpieczone
+    niżej, dla stacji z jednym dniem o identycznym min==max)."""
+    W, H = 640, 220
+    pad_l, pad_r, pad_t, pad_b = 40, 20, 20, 30
+    plot_w = W - pad_l - pad_r
+    plot_h = H - pad_t - pad_b
+
+    def _num(raw) -> float | None:
+        # "▲12.3" (zmieniona wartość - patrz _mark() w run_simulation) albo
+        # zwykłe "12.3"/"–1.0"/"27" -> float; "–" (brak danych, DEMO/błąd)
+        # -> None, celowo pomijane, nie traktowane jako 0.
+        s = str(raw).lstrip("▲").strip()
+        try:
+            return float(s)
+        except (TypeError, ValueError):
+            return None
+
+    def _fmt_day(date_str: str) -> str:
+        parts = str(date_str).split("-")
+        return f"{parts[2]}.{parts[1]}" if len(parts) == 3 else str(date_str)
+
+    sections = []
+    for node in nodes:
+        # "Stacja" bywa "Krakow_Centrum" albo "Krakow_Centrum ⚡EV" (patrz
+        # stacja_str w run_simulation) - pierwszy token po spacji zawsze to
+        # sama nazwa węzła.
+        day_rows = [r for r in rows if str(r.get("Stacja", "")).split(" ")[0] == node]
+
+        title = html.escape(node)
+
+        if day_rows:
+            thead = "".join(f"<th>{html.escape(c)}</th>" for c in _CITY_SECTION_COLS)
+            trs = []
+            for r in day_rows:
+                tds = "".join(
+                    f"<td>{html.escape(str(r.get(c, '–')))}</td>" for c in _CITY_SECTION_COLS
+                )
+                trs.append(f"<tr>{tds}</tr>")
+            table_html = (
+                '<table class="synchart-table"><thead><tr>'
+                f"{thead}</tr></thead><tbody>{''.join(trs)}</tbody></table>"
+            )
+        else:
+            table_html = ""
+
+        pts: list[tuple[str, float, float]] = []
+        for r in day_rows:
+            t_min = _num(r.get("Min °C"))
+            t_max = _num(r.get("Max °C"))
+            if t_min is None or t_max is None:
+                continue
+            pts.append((str(r.get("Data", "")), t_min, t_max))
+
+        if not pts:
+            sections.append(
+                '<div class="synchart-block">'
+                f'<div class="synchart-title">{title}</div>'
+                f"{table_html}"
+                '<div class="synchart-empty">brak liczbowych danych do wykresu '
+                '(tryb DEMO albo błąd prognozy dla tej stacji)</div>'
+                "</div>"
+            )
+            continue
+
+        n = len(pts)
+        min_vals = [p[1] for p in pts]
+        max_vals = [p[2] for p in pts]
+        y_min = min(min_vals) - 2
+        y_max = max(max_vals) + 2
+        if y_max <= y_min:
+            # wszystkie punkty maja identyczne min==max (np. jeden dzien) -
+            # bez tego y_of() dzieliłby przez zero.
+            y_max = y_min + 1
+
+        def x_of(i: int) -> float:
+            return pad_l + plot_w / 2 if n == 1 else pad_l + i * (plot_w / (n - 1))
+
+        def y_of(t: float) -> float:
+            return pad_t + (y_max - t) / (y_max - y_min) * plot_h
+
+        max_pts = [(x_of(i), y_of(p[2])) for i, p in enumerate(pts)]
+        min_pts = [(x_of(i), y_of(p[1])) for i, p in enumerate(pts)]
+        band_pts_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in max_pts + list(reversed(min_pts)))
+        max_pts_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in max_pts)
+        min_pts_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in min_pts)
+
+        # linie siatki co 6 stopni, zaokraglone do wielokrotnosci 6 - zeby
+        # nie wypadaly w losowych miejscach jak np. -13.4 (tak samo jak w
+        # ARCTIC).
+        grid_lines = []
+        g = math.ceil(y_min / 6) * 6
+        while g <= y_max:
+            grid_lines.append(g)
+            g += 6
+
+        svg_parts = []
+        for g in grid_lines:
+            y = y_of(g)
+            svg_parts.append(f'<line class="synchart-gridline" x1="{pad_l}" y1="{y:.1f}" x2="{W - pad_r}" y2="{y:.1f}"/>')
+            svg_parts.append(f'<text class="synchart-axislbl" x="4" y="{y + 4:.1f}">{g}°</text>')
+        svg_parts.append(f'<polygon class="synchart-band" points="{band_pts_str}"/>')
+        svg_parts.append(f'<polyline class="synchart-maxline" points="{max_pts_str}"/>')
+        svg_parts.append(f'<polyline class="synchart-minline" points="{min_pts_str}"/>')
+        for i, (data_str, t_min, t_max) in enumerate(pts):
+            x = x_of(i)
+            y_max_pt = y_of(t_max)
+            y_min_pt = y_of(t_min)
+            svg_parts.append(f'<circle class="synchart-pt max" cx="{x:.1f}" cy="{y_max_pt:.1f}" r="3.5"/>')
+            svg_parts.append(f'<circle class="synchart-pt min" cx="{x:.1f}" cy="{y_min_pt:.1f}" r="3.5"/>')
+            svg_parts.append(f'<text class="synchart-lbl max" x="{x:.1f}" y="{y_max_pt - 8:.1f}" text-anchor="middle">{t_max:.1f}</text>')
+            svg_parts.append(f'<text class="synchart-lbl min" x="{x:.1f}" y="{y_min_pt + 14:.1f}" text-anchor="middle">{t_min:.1f}</text>')
+            svg_parts.append(f'<text class="synchart-daylbl" x="{x:.1f}" y="{H - 8}" text-anchor="middle">{html.escape(_fmt_day(data_str))}</text>')
+
+        svg = (
+            f'<svg viewBox="0 0 {W} {H}" role="img" '
+            f'aria-label="Wykres prognozy temperatury maksymalnej i minimalnej na kolejne dni dla {title}">'
+            + "".join(svg_parts) + "</svg>"
+        )
+        sections.append(
+            '<div class="synchart-block">'
+            f'<div class="synchart-title">{title}</div>'
+            f"{table_html}"
+            f"{svg}"
+            '<div class="synchart-legend">'
+            '<span><span class="sw sw-max"></span>maks.</span>'
+            '<span><span class="sw sw-min"></span>min.</span>'
+            "</div>"
+            "</div>"
+        )
+
+    if not sections:
+        return '<div class="synchart-wrap"><div class="synchart-empty">Brak wybranych miast.</div></div>'
+    return '<div class="synchart-wrap">' + "".join(sections) + "</div>"
+
+
+def update_city_filter_view(rows: list[dict], nodes_all: list[str], selected: list[str] | None) -> str:
+    """Przebudowuje karty tabela+wykres PER MIASTO z JUŻ POBRANYCH danych
+    (`rows`/`nodes_all` z gr.State - patrz koniec run_simulation()), bez
+    żadnego nowego zapytania sieciowego - wywoływane przy zmianie w
+    dropdownie "Widoczne miasta" (`city_filter` w create_app()), na wyraźną
+    prośbę użytkownika ("moga byc wybierane miasta z menu dodatkowego").
+
+    Kolejność wynikowa = kolejność `nodes_all` (kolejność ostatniego
+    uruchomienia, ta sama co w głównej tabeli), NIE kolejność klikania w
+    dropdownie - spójne z resztą aplikacji. Pusty wybór (użytkownik odznaczył
+    wszystko) -> pokaż wszystkie, ten sam wzorzec co pusty wybór w "Wybór
+    miast" wewnątrz run_simulation (nigdy całkiem pusty widok bez
+    wyjaśnienia)."""
+    chosen = set(selected) if selected else set(nodes_all)
+    ordered = [n for n in nodes_all if n in chosen]
+    return _build_city_sections_html(rows, ordered)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # główna funkcja backendu
 # ══════════════════════════════════════════════════════════════════════════════
@@ -737,7 +936,7 @@ def run_simulation(
     history_days: int,
     forecast_days: int,
     offline_demo: bool,
-) -> tuple[str, pd.DataFrame, str]:
+) -> tuple[str, pd.DataFrame, str, str, list[dict], list[str], dict]:
 
     logs: list[str] = []
     rows: list[dict] = []
@@ -1239,7 +1438,17 @@ def run_simulation(
     else:
         row_note = ""
 
-    return log_str, df_out, row_note
+    # DODANE: karty tabela+wykres per miasto - patrz docstring
+    # _build_city_sections_html(). `rows` (nie df_out) - te same surowe
+    # dicty, z "Stacja"/"Data"/"Min °C"/"Max °C" itd. tak jak zbudowane
+    # wyżej per węzeł, zanim porzadkowanie kolumn (df_out) cokolwiek zmieni.
+    # `rows`/`nodes` zwracane też SUROWO do gr.State (rows_state/nodes_state)
+    # - żeby dropdown "Widoczne miasta" (city_filter) mógł filtrować widok
+    # bez ponownego zapytania sieciowego (patrz update_city_filter_view()).
+    charts_html = _build_city_sections_html(rows, nodes)
+    city_filter_update = gr.update(choices=nodes, value=nodes)
+
+    return log_str, df_out, row_note, charts_html, rows, nodes, city_filter_update
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1384,6 +1593,60 @@ _CSS = """
         #run_btn:hover {
             background: #15803d !important;
         }
+
+        /* DODANE: karty tabela+wykres per miasto (_build_city_sections_html)
+           - kolory/klasy przeniesione 1:1 z SYNOPTYK-ARCTIC/webapp/static/
+           index.html (.outlook-*), tylko z prefiksem "synchart-" (uniknięcie
+           kolizji nazw, gdyby kiedyś obie appki współdzieliły jakiś wspólny
+           layer CSS) i var(--...) zamienione na te same konkretne kolory co
+           tam (ARCTIC też je definiuje jako zwykłe zmienne, nie coś
+           motywowo-zależne). */
+        #city_charts .synchart-wrap { display: flex; flex-direction: column; gap: 18px; }
+        #city_charts .synchart-block {
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            border-radius: 8px;
+            padding: 10px 14px 6px 14px;
+        }
+        #city_charts .synchart-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 4px; }
+        #city_charts .synchart-empty { font-size: 0.85rem; color: #94a3b8; padding: 8px 0; }
+        #city_charts svg { width: 100%; height: auto; display: block; }
+        #city_charts .synchart-gridline { stroke: rgba(148, 163, 184, 0.3); stroke-width: 1; }
+        #city_charts .synchart-band { fill: #0ea5e9; fill-opacity: 0.12; }
+        #city_charts .synchart-maxline { fill: none; stroke: #e0745a; stroke-width: 2; }
+        #city_charts .synchart-minline { fill: none; stroke: #4fa8d1; stroke-width: 2; }
+        #city_charts .synchart-pt { fill: var(--body-background-fill, #fff); stroke-width: 2; }
+        #city_charts .synchart-pt.max { stroke: #e0745a; }
+        #city_charts .synchart-pt.min { stroke: #4fa8d1; }
+        #city_charts .synchart-lbl { font-family: ui-monospace, monospace; font-size: 11px; }
+        #city_charts .synchart-lbl.max { fill: #e0745a; }
+        #city_charts .synchart-lbl.min { fill: #4fa8d1; }
+        #city_charts .synchart-axislbl, #city_charts .synchart-daylbl {
+            font-family: ui-monospace, monospace; font-size: 11px; fill: #94a3b8;
+        }
+        #city_charts .synchart-legend { display: flex; gap: 16px; font-size: 11px; color: #94a3b8; margin-top: 2px; }
+        #city_charts .synchart-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+        #city_charts .synchart-legend .sw-max { background: #e0745a; }
+        #city_charts .synchart-legend .sw-min { background: #4fa8d1; }
+        /* DODANE: mala tabelka dni WEWNATRZ kazdej karty miasta (patrz
+           _CITY_SECTION_COLS / _build_city_sections_html) - odrebne klasy
+           od #forecast_table, celowo gesciej i mniejszym fontem, bo to
+           JEDNO miasto naraz (kolumn tyle samo, ale nie trzeba az tak
+           szeroko jak w tabeli laczacej wiele stacji). */
+        #city_charts .synchart-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-variant-numeric: tabular-nums;
+            font-size: 0.82rem;
+            margin-bottom: 8px;
+        }
+        #city_charts .synchart-table th, #city_charts .synchart-table td {
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            padding: 4px 7px;
+            text-align: center;
+            white-space: nowrap;
+        }
+        #city_charts .synchart-table th { font-weight: 700; font-size: 0.74rem; }
         """
 
 
@@ -1558,6 +1821,35 @@ def create_app():
                 # wszystkie trzy zawsze obecne w wyniku). Ten komunikat ma
                 # to jednoznacznie wyjaśnić bez konieczności zgadywania.
                 row_count_note = gr.Markdown("", elem_id="row_count_note")
+                # DODANE: karty tabela+wykres per miasto (jak w
+                # SYNOPTYK-ARCTIC, patrz _build_city_sections_html) - NAD
+                # głównym `table` niżej, na wyraźną prośbę użytkownika
+                # ("wykres na górze tabela pod"). Główny gr.Dataframe
+                # zostaje bez zmian - to jest NOWA, dodatkowa sekcja, nie
+                # zamiana.
+                # `rows_state`/`nodes_state` - surowe dane z ostatniego
+                # run_simulation(), potrzebne do przefiltrowania kart bez
+                # ponownego zapytania sieciowego (patrz city_filter niżej
+                # i update_city_filter_view()).
+                rows_state = gr.State([])
+                nodes_state = gr.State([])
+                # DODANE: "menu dodatkowe" na wyraźną prośbę użytkownika
+                # ("podziel tabele i wykres na miasta moga byc wybierane
+                # miasta z menu dodatkowego") - NIEZALEŻNE od głównego
+                # wyboru Region/Miasto/Miasta (wyżej, po lewej), który
+                # decyduje co POBRAĆ. Ten dropdown decyduje tylko, które z
+                # JUŻ POBRANYCH miast są WIDOCZNE jako karty tabela+wykres -
+                # filtr, nie nowe pobranie. Domyślnie (po każdym uruchomieniu)
+                # pokazuje wszystkie pobrane miasta (patrz city_filter_update
+                # w run_simulation).
+                city_filter = gr.Dropdown(
+                    choices=[],
+                    value=[],
+                    multiselect=True,
+                    label="Widoczne miasta (karty tabela+wykres)",
+                    elem_id="city_filter",
+                )
+                city_charts = gr.HTML(elem_id="city_charts")
                 # NAPRAWIONE: wrap=True + za wąskie kolumny ("Stacja"=120px,
                 # "Data"=95px) łamały "Krakow_Centrum"/"2026-08-16" do dwóch
                 # linii - różne wiersze wychodziły różnej wysokości ("skoki").
@@ -1616,7 +1908,17 @@ def create_app():
         btn.click(
             fn=run_simulation,
             inputs=[mode, region, city, cities_multi, history_days, forecast_days, offline],
-            outputs=[logs_box, table, row_count_note],
+            outputs=[logs_box, table, row_count_note, city_charts, rows_state, nodes_state, city_filter],
+        )
+
+        # DODANE: zmiana w "Widoczne miasta" tylko przeukłada/filtruje karty
+        # z JUŻ POBRANYCH danych (rows_state/nodes_state) - bez ponownego
+        # wywołania run_simulation()/zapytań sieciowych. Patrz
+        # update_city_filter_view().
+        city_filter.change(
+            fn=update_city_filter_view,
+            inputs=[rows_state, nodes_state, city_filter],
+            outputs=[city_charts],
         )
 
         clear_cache_btn.click(
