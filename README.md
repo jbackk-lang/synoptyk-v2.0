@@ -1,7 +1,6 @@
 # 🌪️ Synoptyk v2.0
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Dane: Open-Meteo](https://img.shields.io/badge/dane-Open--Meteo-0ea5e9)](https://open-meteo.com/)
 
 Wielodniowa prognoza pogody dla Polski i wybranych regionów USA, oparta na danych Open-Meteo (ECMWF/ICON), z filtrem falkowym Daubechies i korektą obciążenia liczoną na żywo z realnych pomiarów. Wyniki w GUI Gradio — każdy dzień prognozy jako osobny wiersz.
