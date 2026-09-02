@@ -14,6 +14,8 @@ Wielodniowa prognoza pogody dla Polski i wybranych regionów USA, oparta na dany
 - koryguje prognozę na żywo na podstawie tego, jak bardzo się myliła w przeszłości (korekta obciążenia — patrz „Jak czytać tabelę wyników” niżej)
 - wyświetla prognozę dzienną (1–14 dni) z datami, min/śr/max temperatury, sumą opadów, średnim ciśnieniem i maksymalnym wiatrem, z wykresem pasmowym per miasto
 - ostrzega w dzienniku GUI gdy dane archiwalne są starsze niż 2 doby
+- Synoptyk nie generuje własnej prognozy fizycznej — stabilizuje i koryguje prognozę Open‑Meteo, dodając lokalne poprawki i analizę trendu.
+
 
 ## Co NIE jest celem Synoptyk v2.0
 
@@ -52,6 +54,8 @@ Wymagania: `gradio>=4.0`, `numpy`, `pandas`, `pywavelets`, `requests` (pełna li
 3. **TOR REGRESYJNY** — `TIMDRForecast` (samodzielny, **nie używany w GUI** — dostępny przez CLI/API).
 4. **ANALIZA SYGNAŁÓW** — `SynoptykV3`/`SynoptykV4` (`flow`/`twist`/`fronts`/`anomalies`) — analiza szeregu czasowego, nie prognoza.
 5. **CZUJNIK** — `WeatherTrigger` — zdarzenia w historii (FRONT/ANOMALY/TWIST), nie prognoza na przyszłość.
+6. Mieszanie V4 z głównym torem zaczyna się dopiero od +3d, bo krótkoterminowa prognoza Open‑Meteo jest zwykle trafniejsza niż lokalny trend; opady nie są mieszane, bo trend liniowy nie pasuje do zjawisk progowych; TIMDRForecast nie jest w GUI, bo wymaga pełnego szeregu godzinowego i działa wolniej.
+
 
 Pełne szczegóły każdego toru: [`docs/engines.md`](docs/engines.md).
 
@@ -96,12 +100,14 @@ Wykrywa zdarzenia w danych historycznych: `FRONT` > `ANOMALY` > `TWIST` > `NONE`
 - **🟢** — korekta aktywna, solidniejsza próbka (≥15 obserwacji).
 - **`V4 °C`** — niezależny tor trendowy (punkt + pasmo), do porównania, nie główna prognoza.
 - **⚠️FB** — fallback: brak świeżych danych z API, liczone z historii CSV (patrz „Kiedy pojawia się ⚠️FB” niżej).
+- V4 °C może różnić się wyraźnie od głównej prognozy — to normalne: V4 jest czystą ekstrapolacją trendu z historii, bez modelu fizycznego NWP.
+
 
 Pełne wyjaśnienie korekty obciążenia (i jak dawniej zawyżała błąd): [`docs/bias_correction.md`](docs/bias_correction.md).
 
 ## Kiedy pojawia się ⚠️FB?
 
-Gdy Open-Meteo nie odpowiada, Synoptyk używa ostatnich zapisanych danych z `krakow_forecast_snapshots.csv`. **To NIE jest demo** — to realne dane z poprzednich uruchowień, tylko bez korekty obciążenia i bez `▲`/`⚡EV` (nie mają punktu odniesienia). Szczegóły i inne fallbacki (np. domyślne współrzędne nieznanych miast): [`docs/fallbacks.md`](docs/fallbacks.md).
+Gdy Open-Meteo nie odpowiada, Synoptyk używa ostatnich zapisanych danych z `krakow_forecast_snapshots.csv`. Wyniki ⚠️FB nie mają korekty obciążenia, nie mają oznaczeń ▲/⚡EV i mogą być starsze niż bieżące dane — to tylko awaryjne podtrzymanie działania GUI.**To NIE jest demo** — to realne dane z poprzednich uruchowień, tylko bez korekty obciążenia i bez `▲`/`⚡EV` (nie mają punktu odniesienia). Szczegóły i inne fallbacki (np. domyślne współrzędne nieznanych miast): [`docs/fallbacks.md`](docs/fallbacks.md).
 
 ## Typowe problemy użytkownika
 
@@ -111,6 +117,15 @@ Gdy Open-Meteo nie odpowiada, Synoptyk używa ostatnich zapisanych danych z `kra
 | `🔴` zamiast `🟠`/`🟢` | korekta obciążenia jeszcze nieaktywna — za mało zebranych par prognoza/rzeczywistość |
 | żadnej wartości z `▲` | nic się nie zmieniło względem poprzedniego uruchomienia (albo cache `_last_pull_cache.json` wyczyszczony) |
 | brak `⚡EV` mimo dużej zmiany | próg skoku (2°C/10mm/5hPa/8km/h) nie został przekroczony — to nie błąd, tylko nieprzekroczony próg |
+
+## Co robić gdy coś wygląda dziwnie?
+
+- brak ▲ — Open‑Meteo nie zaktualizowało modelu od poprzedniego uruchomienia.
+- brak ⚡EV — zmiana nie przekroczyła progu (2°C/10mm/5hPa/8km/h).
+- 🔴 — korekta obciążenia nie ma jeszcze danych (min. 5 par prognoza/rzeczywistość).
+- V4 °C „dziwne” — normalne: to trend, nie model fizyczny.
+- opady 0 przez kilka dni — normalne: Open‑Meteo często daje 0 przy braku pewności.
+- ⚠️FB — API nie odpowiada; to awaryjne podtrzymanie działania.
 
 ---
 
