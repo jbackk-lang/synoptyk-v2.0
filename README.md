@@ -189,6 +189,29 @@ Domyślny silnik GUI to `SynoptykFEngine` (filtr falkowy) z prognozą z Open-Met
 
 23 testy w `analyzer/test_synoptyk_v4.py` (pytest). Gdy MAD wychodzi dokładnie 0 (płaski sygnał — normalny przypadek, nie skrajny), progi spadają na fallback `std()` zamiast zwracać pusty wynik. Domyślne progi (`twist_factor=3.5`, `anomaly_factor=3.0`) mogą nie wykryć bardzo łagodnych, rozłożonych w czasie frontów — są parametrami, można je obniżyć kosztem większej liczby fałszywych alarmów na czystym szumie (zmierzone: ~1% przy domyślnych progach, ~13–27% przy obniżonych do 2.0).
 
+### WeatherTrigger — czujnik sygnałowy nad SynoptykV4 (NOWE)
+
+`analyzer/weather_trigger.py` — **czujnik** (NIE model, NIE prognoza):
+`WeatherTrigger`, dispatcher nad `fronts()`/`anomalies()`/`twist()`/
+`circular_anomalies()`, które były dotąd całkowicie osierocone w tej
+aplikacji (używane tylko we własnych testach — `api/main.py` korzysta z
+innego modułu, `gui_app.py` woła z `SynoptykV4` tylko `forecast()`).
+Mówi który typ zdarzenia się odpalił, w którym kanale i gdzie: `FRONT`
+(twist i anomalia się zgadzają) > `ANOMALY` (pojedynczy potwierdzony
+sygnał, także `circular_anomalies()` dla kierunku wiatru) > `TWIST`
+(samo, najbardziej szumiące) > `NONE`. Wpięty do `gui_app.py` — zgłasza
+się do Dziennika (nie jako kolejna kolumna tabeli, żeby nie powtórzyć
+błędu z usuniętej kolumny "typ" TIMDR opisanego wyżej w kodzie). Testy:
+`analyzer/test_weather_trigger.py` (8 testów, 31/31 łącznie z V4).
+
+```python
+from analyzer import WeatherTrigger
+
+trigger = WeatherTrigger()
+result = trigger.analyze(t, {"temp": temp, "pressure": pressure})
+print(result.trigger_type, result.channel, result.location, result.message)
+```
+
 ---
 
 ## Znane ograniczenia
@@ -198,7 +221,7 @@ Domyślny silnik GUI to `SynoptykFEngine` (filtr falkowy) z prognozą z Open-Met
 - `forecaster/validator.py` implementuje MAE i RMSE, ale walidacja out-of-sample nie jest uruchamiana automatycznie.
 - `SynoptykV3.flow()`/`trm()` przy liczbie próbek `n` mieszczącej się w `k_neighbors` (domyślnie 12) cicho degenerują lokalną analizę do jednej globalnej regresji/mediany dla całego okna — sąsiedztwo każdego punktu to wtedy cały zbiór. Kod ostrzega o tym `RuntimeWarning`, ale nie naprawia tego automatycznie; dla krótkich okien zmniejsz `k_neighbors` albo zwiększ liczbę próbek. To samo dotyczy `SynoptykV4` (domyślnie `k_neighbors=8`).
 - `SynoptykV4.twist()`/`anomalies()`/`fronts()` z domyślnymi progami mogą nie wykryć bardzo łagodnych, rozłożonych na kilka próbek frontów (patrz docstring modułu, "Historia poprawek" punkt 1) — próg jest teraz parametrem (`twist_factor`/`anomaly_factor`), obniżenie go zwiększa czułość kosztem fałszywych alarmów na czystym szumie.
-- `SynoptykV4.forecast()`/`forecast_wind_speed()`/`forecast_wind_direction()` to prosta heurystyka (tłumiona ekstrapolacja trendu + powrót do lokalnej średniej), nie model NWP. **Aktualizacja 2026-08-26:** ten punkt był nieaktualny — `krakow_forecast_snapshots.csv` ma już 862 sparowane pary (prognoza V4, rzeczywistość) dla lead_days 0–8, wystarczająco do policzenia `compute_lead_bias(forecast_col="v4_point_c")`. Wynik: V4 jest WYRAŹNIE gorszy niż główny tor przy krótkim horyzoncie — bias +3.9…+4.5°C i MAE 4.6–6.4°C dla lead_days 0–2 (główny tor: bias ~+1.5°C, MAE ~2.1–2.4°C dla tych samych dni), zbiegają się dopiero około lead_days 4–6 (V4 MAE spada do ~2.8–3.7°C, wciąż nie lepszy od głównego toru). Innymi słowy: V4 nie jest jeszcze konkurencyjny wobec głównego silnika na realnych, wieloetapowych danych — to zmierzony wynik, nie tylko brak danych.
+- `SynoptykV4.forecast()`/`forecast_wind_speed()`/`forecast_wind_direction()` to prosta heurystyka (tłumiona ekstrapolacja trendu + powrót do lokalnej średniej), nie model NWP — nieprzetestowana jeszcze na rzeczywistych wieloetapowych danych z `krakow_forecast_snapshots.csv`, tylko na danych syntetycznych.
 - Mieszanie głównej prognozy z własną ekstrapolacją trendu (`_blend_weight()` w `gui_app.py`) na dalekim horyzoncie tłumi wahania *między pobraniami*, ale **nie znaczy, że wynik jest trafniejszy** — tylko stabilniejszy. Jeśli Open-Meteo akurat trafnie wychwyciło zbliżający się front, a lokalny trend z ostatnich dni tego nie sugeruje, mieszanie ściągnie prognozę w stronę mniej trafnej wartości. Próg (+3d) i tempo narastania wagi (do +10d) są wybrane heurystycznie, nie strojone na rzeczywistych błędach prognozy — do zweryfikowania po zebraniu kilku-kilkunastu dni danych w `krakow_forecast_snapshots.csv`.
 - `AdaptiveThresholds.fallback_df` (kalibracja na żywo, gdy `weather_cache.db` jest puste — patrz sekcja „GUI — opis panelu") liczy "normalność" z tego samego okna, które analizuje — front pogodowy obecny przez całe okno (np. 7 dni ciągłego deszczu) nie zostanie wykryty jako anomalia, bo sam podniesie średnią. Dodatkowo `threshold_defekt` (skok między kolejnymi punktami) jest wrażliwy na czysty szum pomiarowy przy krótkich/niegładkich seriach — im bardziej "poszarpane" dane wejściowe, tym więcej fałszywych `defekt`. Realne dane z Open-Meteo (godzinowe, skorelowane w czasie) są znacznie gładsze niż losowy szum, więc w praktyce powinno to być rzadsze niż w syntetycznych testach.
 - `forecaster/bias_correction.py`: porównuje wiersz rzeczywisty (`IMGW_real_*`/`web_szukaj_*`) z pojedynczym punktem w czasie, a prognozę reprezentuje `avg_temp_c` (średnia dobowa) — to niedoskonałe porównanie (punkt vs średnia), zwłaszcza dla popołudniowych odczytów blisko dobowego maksimum, które systematycznie zawyżają zmierzone obciążenie. Przy różnorodniejszych porach odczytu w CSV powinno się to uśrednić; na razie traktować wyliczone `bias` jako orientacyjne, nie precyzyjne.

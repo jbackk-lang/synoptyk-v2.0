@@ -71,6 +71,12 @@ except Exception:
     _V4_OK = False
 
 try:
+    from analyzer.weather_trigger import WeatherTrigger, WeatherTriggerType
+    _WTRIG_OK = True
+except Exception:
+    _WTRIG_OK = False
+
+try:
     from forecaster.bias_correction import compute_lead_bias, apply_bias_correction
     _BIAS_OK = True
 except Exception:
@@ -890,6 +896,41 @@ def run_simulation(
                         )
             except Exception:
                 pass
+
+        # ── WeatherTrigger: front/anomalia/twist na GODZINOWEJ historii
+        # (analyzer/weather_trigger.py) - dispatcher nad SynoptykV4.fronts()/
+        # twist()/anomalies()/circular_anomalies(), ktore byly dotad
+        # CALKOWICIE osierocone w tej appce (uzywane tylko wewnatrz wlasnych
+        # testow - sprawdzone grepem po calym repo; jedyne wywolanie
+        # SynoptykV4 w gui_app.py to forecast() wyzej). Zglaszane WYLACZNIE
+        # do Dziennika (logs), gdy faktycznie cos sie odpali - NIE jako
+        # kolejna kolumna tabeli, zeby nie powtorzyc bledu "typ" TIMDR
+        # (patrz komentarz przy `timdr_results` nizej - kolumna usunieta,
+        # bo przy tamtym progu opadu byla praktycznie zawsze aktywna).
+        if _WTRIG_OK and df_hist is not None and len(df_hist) >= 8:
+            try:
+                t_hourly = np.arange(len(df_hist), dtype=float)
+                channels = {}
+                for col in ("temp", "pressure", "wind"):
+                    if col in df_hist.columns and df_hist[col].notna().all():
+                        channels[col] = df_hist[col].to_numpy(dtype=float)
+                wind_dir_name = None
+                if "wind_dir" in df_hist.columns and df_hist["wind_dir"].notna().all():
+                    channels["wind_dir"] = df_hist["wind_dir"].to_numpy(dtype=float)
+                    wind_dir_name = "wind_dir"
+                if channels:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        wtrig = WeatherTrigger().analyze(
+                            t_hourly, channels, wind_direction_channel=wind_dir_name,
+                        )
+                    if wtrig.triggered:
+                        logs.append(
+                            f"⚡ {node}: {wtrig.trigger_type.value} w kanale "
+                            f"'{wtrig.channel}' (godz. {wtrig.location} historii) - {wtrig.message}"
+                        )
+            except Exception as e:
+                logs.append(f"⚠️  {node}: błąd WeatherTrigger: {e}")
 
         # ── własna ekstrapolacja trendu dla pozostałych parametrów ─────────
         # (temp_avg już mamy z v4_forecast powyżej — reużywamy go zamiast
