@@ -39,20 +39,43 @@ _REAL_SOURCE_PREFIXES = ("IMGW_real", "web_szukaj", "OpenMeteo_real")
 _FORECAST_SOURCE_PREFIX = "prognoza"
 
 
-def _load_pairs(csv_path: str, station: str | None = None, forecast_col: str = "avg_temp_c") -> pd.DataFrame:
+def _load_pairs(
+    csv_path: str,
+    station: str | None = None,
+    forecast_col: str = "avg_temp_c",
+    real_col: str = "max_temp_c",
+) -> pd.DataFrame:
     """Wczytuje CSV i zwraca pary (lead_days, forecast, real) dla każdego
     target_date, gdzie mamy zarówno prognozę, jak i późniejszy pomiar
     rzeczywisty.
 
-    UWAGA: wiersze rzeczywiste w CSV to pojedynczy odczyt punktowy (nie
-    dobowa średnia) — zapisywany historycznie w kolumnie max_temp_c (tak
-    powstawał ten CSV od początku, patrz wpisy IMGW_real_15:00 itp.).
-    Porównujemy go więc z avg_temp_c prognozy jako najbliższym przybliżeniu,
-    co jest niedoskonałe (punkt w czasie vs średnia dobowa) i wprowadza
-    własny szum do oszacowania obciążenia — to dodatkowy powód na
-    stosunkowo wysoki domyślny próg `min_samples` w `compute_lead_bias()`.
+    NAPRAWIONE (bug znaleziony przy analizie realnej trafności - patrz
+    HISTORIA_BUDOWY.md/README): domyślne parowanie było `avg_temp_c`
+    (prognoza) vs `max_temp_c` (rzeczywistość) - a `max_temp_c`
+    rzeczywistości to od `_backfill_real_observations()`
+    (gui_app.py, `OpenMeteo_real_dailymax`) DOBOWE MAKSIMUM, nie średnia.
+    Porównanie "prognozowana średnia" vs "zmierzone maksimum" ma z
+    definicji strukturalny, systematyczny offset (max >= avg każdego dnia,
+    zwykle kilka stopni w lecie) - to samo w sobie zawyżało zmierzony
+    bias/MAE, niezależnie od tego, jak dobry jest model. Starsze wiersze
+    real (IMGW_real_15:00/web_szukaj_* - pojedynczy odczyt punktowy z
+    popołudnia) miały ten sam problem w mniejszej skali (punkt bliski
+    szczytowi dnia, nie prawdziwa średnia).
 
-    DODANE: `forecast_col` - pozwala liczyć te same pary dla innej kolumny
+    Naprawa: `real_col` - domyślnie WCIĄŻ "max_temp_c" (wsteczna
+    kompatybilność - istniejące wywołania bez zmian), ale
+    `_backfill_real_observations()` od teraz wypełnia RÓWNIEŻ
+    `min_temp_c`/`avg_temp_c` rzeczywistości (dobowe min/średnia z tego
+    samego archiwum godzinowego) - więc wołający (patrz run_simulation w
+    gui_app.py) może poprawnie parować: `forecast_col="avg_temp_c"` z
+    `real_col="avg_temp_c"`, `forecast_col="max_temp_c"` z
+    `real_col="max_temp_c"`, `forecast_col="min_temp_c"` z
+    `real_col="min_temp_c"` - zamiast mieszać średnią z maksimum. Starsze
+    wiersze real bez wypełnionego `min_temp_c`/`avg_temp_c` (puste ->
+    pd.isna) po prostu nie wejdą do pary dla tych dwóch kolumn - poprawnie
+    pomijane, tak jak już działa dla `v4_point_c` niżej.
+
+    `forecast_col` - pozwala liczyć te same pary dla innej kolumny
     prognozy niż domyślna `avg_temp_c` (głównego, mieszanego silnika).
     Konkretnie: `v4_point_c` (samodzielny punkt SynoptykV4, dodany do CSV
     razem z `v4_lower_c`/`v4_upper_c` - patrz DODANE w gui_app.py przy
@@ -72,7 +95,9 @@ def _load_pairs(csv_path: str, station: str | None = None, forecast_col: str = "
 
     # jedna rzeczywista wartość per target_date — jeśli kilka odczytów tego
     # samego dnia, bierzemy ostatni zapisany (najpełniejszy/najświeższy)
-    real_by_date = real.groupby("target_date")["max_temp_c"].last()
+    if real_col not in real.columns:
+        return pd.DataFrame(columns=["lead_days", "forecast", "real"])
+    real_by_date = real.groupby("target_date")[real_col].last()
 
     rows = []
     for _, r in fc.iterrows():
@@ -94,6 +119,7 @@ def compute_lead_bias(
     station: str | None = None,
     min_samples: int = 5,
     forecast_col: str = "avg_temp_c",
+    real_col: str = "max_temp_c",
 ) -> dict[int, dict]:
     """Zwraca {lead_days: {"bias": ..., "mae": ..., "n": ...}} TYLKO dla
     lead_days z >= min_samples sparowanymi obserwacjami. Brak wpisu dla
@@ -105,9 +131,16 @@ def compute_lead_bias(
 
     `forecast_col` - patrz `_load_pairs()`; użyj `"v4_point_c"`, żeby
     policzyć bias/MAE dla samodzielnego toru V4 zamiast głównego.
+
+    `real_col` - DOMYŚLNIE "max_temp_c" (wsteczna kompatybilność), ale
+    patrz NAPRAWIONE w `_load_pairs()`: żeby faktycznie porównywać
+    "jabłka z jabłkami", wołający powinien parować
+    `forecast_col="avg_temp_c"` z `real_col="avg_temp_c"` i
+    `forecast_col="max_temp_c"` z `real_col="max_temp_c"` (i analogicznie
+    dla min) - nie mieszać prognozowanej średniej z realnym maksimum.
     """
     try:
-        pairs = _load_pairs(csv_path, station=station, forecast_col=forecast_col)
+        pairs = _load_pairs(csv_path, station=station, forecast_col=forecast_col, real_col=real_col)
     except Exception:
         return {}
 
