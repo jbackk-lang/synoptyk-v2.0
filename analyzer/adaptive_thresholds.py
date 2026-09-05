@@ -121,12 +121,23 @@ class AdaptiveThresholds:
         thresholds = self.get_thresholds(dt, param)
         return abs(current - previous) > thresholds['threshold_defekt']
     
-    def is_trend_reversal(self, series: pd.Series, dt: datetime, param: str) -> bool:
-        if len(series) < 3:
-            return False
-        diff = series.diff()
-        if len(diff) >= 2 and diff.iloc[-1] is not None and diff.iloc[-2] is not None:
-            sign_change = (diff.iloc[-1] > 0) != (diff.iloc[-2] > 0)
-            thresholds = self.get_thresholds(dt, param)
-            return sign_change and abs(diff.iloc[-1]) > thresholds['threshold_skret']
-        return False
+    def is_trend_reversal(self, diff_curr: float, diff_prev: float, dt: datetime, param: str) -> bool:
+        """
+        NAPRAWIONE (wydajność - profiler pokazał 1,27s/2,19s analyze() tutaj):
+        wcześniej przyjmowało cały wycinek `series` (df[param].iloc[okno]) i
+        liczyło `series.diff()` NA NOWO przy każdym z ~3585 wywołań
+        (5 parametrów x liczba wierszy) - tworzenie nowego obiektu pandas
+        Series na tak małym wycinku ma nieproporcjonalnie duży narzut wobec
+        samej operacji. `diff.iloc[-1]`/`diff.iloc[-2]` zależą WYŁĄCZNIE od
+        3 ostatnich surowych wartości kolumny (idx, idx-1, idx-2) - rozmiar
+        okna (idx-5..idx w wywołującym kodzie) nigdy na nie nie wpływał, więc
+        wołający liczy teraz `df[param].diff()` RAZ na cały parametr (5
+        wywołań zamiast ~3585) i przekazuje tu gotowe dwie liczby.
+        Zachowanie identyczne jak poprzednio: porównania na NaN (gdy diff
+        jeszcze niezdefiniowany) naturalnie dają False, bez potrzeby
+        jawnego sprawdzania (oryginalny warunek `is not None` był zresztą
+        bez znaczenia dla float NaN - `np.nan is not None` to zawsze True).
+        """
+        sign_change = (diff_curr > 0) != (diff_prev > 0)
+        thresholds = self.get_thresholds(dt, param)
+        return bool(sign_change and abs(diff_curr) > thresholds['threshold_skret'])
