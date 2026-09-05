@@ -28,6 +28,7 @@ import json
 import math
 import os
 import sys
+import time
 import warnings
 from datetime import date, timedelta
 
@@ -980,6 +981,14 @@ def run_simulation(
     engine = SynoptykFEngine(wavelet="db4") if _SF_OK else None
 
     for node in nodes:
+        # DODANE (diagnostyka "dlaczego to teraz liczy dłużej"): znaczniki
+        # czasu per-etap dla tej stacji, dopisywane do Dziennika od razu po
+        # zakończeniu danego bloku (nie na końcu pętli) - zeby byly widoczne
+        # w logach nawet jesli petla dla tego node'a zakonczy sie wczesniej
+        # (np. przez `continue` w bloku fallbacku). t_node0 mierzy sume
+        # wszystkiego dla tej stacji, logowane na samym koncu przetwarzania
+        # tego node'a (po pelnym sukcesie).
+        t_node0 = time.perf_counter()
         lat, lon = _get_coords(node)
         meta = get_node_metadata(node)
         uhi   = meta.get("uhi_factor", 1.0)
@@ -1000,6 +1009,7 @@ def run_simulation(
         # tabele, każda parująca odpowiadającą kolumnę prognozy z
         # odpowiadającą kolumną rzeczywistości (avg<->avg, min<->min,
         # max<->max) - stosowane niżej osobno do t_avg/t_min/t_max.
+        t_bias0 = time.perf_counter()
         bias_tables: dict[str, dict] = {"avg": {}, "min": {}, "max": {}}
         if _BIAS_OK:
             for _key, _col in (("avg", "avg_temp_c"), ("min", "min_temp_c"), ("max", "max_temp_c")):
@@ -1022,6 +1032,7 @@ def run_simulation(
                     logs.append(f"🎯 {node}: korekta obciążenia ({_label}) aktywna dla {n_leads} lead_days")
         else:
             bias_table = {}
+        logs.append(f"⏱ {node}: bias_correction (3x odczyt CSV) {time.perf_counter() - t_bias0:.2f}s")
 
         if offline_demo:
             today = date.today()
@@ -1036,6 +1047,7 @@ def run_simulation(
             continue
 
         # ── historia (do trendu falkowego) ─────────────────────────────────
+        t_hist0 = time.perf_counter()
         df_hist = None
         data_end_str = "brak danych"
         try:
@@ -1057,6 +1069,7 @@ def run_simulation(
                 logs.append(f"✓  {node}: fallback z CSV aktywny ({len(df_hist)} dni z wklejonych pulli)")
             else:
                 logs.append(f"✗  {node}: brak wystarczających danych w CSV do fallbacku (min. 2 dni)")
+        logs.append(f"⏱ {node}: pobieranie historii (sieć Open-Meteo archive) {time.perf_counter() - t_hist0:.2f}s")
 
         # ── TIMDR (opcjonalnie) ─────────────────────────────────────────────
         # NAPRAWIONE: analyzer.analyze(df_hist) rzucał KeyError('wind_dir')
@@ -1078,6 +1091,7 @@ def run_simulation(
         # DEFAULT_RESONANCE_K=3 (status="insufficient_data") - logujemy to
         # samo uczciwie, tym samym wzorcem co bias_correction wyżej, żeby
         # było widać w Dzienniku, czy kalibracja faktycznie coś zmieniła.
+        t_timdr0 = time.perf_counter()
         timdr_results: dict = {}
         if _TIMDR_OK and df_hist is not None:
             try:
@@ -1092,8 +1106,10 @@ def run_simulation(
                 timdr_results = analyzer.analyze(_adapt_for_timdr(df_hist))
             except Exception as e:
                 logs.append(f"⚠️  {node}: błąd analizy TIMDR (sygnały ⚡): {e}")
+        logs.append(f"⏱ {node}: TIMDR (from_calibrated + analyze) {time.perf_counter() - t_timdr0:.2f}s")
 
         # ── korekta falkowa bazowa temperatury ─────────────────────────────
+        t_wavelet0 = time.perf_counter()
         base_correction = 0.0
         if engine is not None and df_hist is not None:
             try:
@@ -1105,6 +1121,7 @@ def run_simulation(
                     base_correction = den_last - raw_last   # δ do zastosowania na prognozie
             except Exception:
                 pass
+        logs.append(f"⏱ {node}: filtr falkowy (SynoptykFEngine) {time.perf_counter() - t_wavelet0:.2f}s")
 
         # ── SynoptykV4: rownolegly silnik prognozy (ekstrapolacja trendu z
         # rzeczywistej historii, NIE z modelu Open-Meteo) - dodany do
@@ -1117,6 +1134,7 @@ def run_simulation(
         # UHI/lapse rate, bo te efekty sa juz obecne w realnych pomiarach
         # historycznych (w odroznieniu od prognozy modelu siatkowego
         # Open-Meteo, ktora ich nie uwzglednia i dlatego wymaga korekty).
+        t_v40 = time.perf_counter()
         v4_forecast = None
         if _V4_OK and df_hist is not None:
             try:
@@ -1141,6 +1159,7 @@ def run_simulation(
                         )
             except Exception:
                 pass
+        logs.append(f"⏱ {node}: SynoptykV4.forecast() {time.perf_counter() - t_v40:.2f}s")
 
         # ── WeatherTrigger: front/anomalia/twist na GODZINOWEJ historii
         # (analyzer/weather_trigger.py) - dispatcher nad SynoptykV4.fronts()/
@@ -1152,6 +1171,7 @@ def run_simulation(
         # kolejna kolumna tabeli, zeby nie powtorzyc bledu "typ" TIMDR
         # (patrz komentarz przy `timdr_results` nizej - kolumna usunieta,
         # bo przy tamtym progu opadu byla praktycznie zawsze aktywna).
+        t_wtrig0 = time.perf_counter()
         if _WTRIG_OK and df_hist is not None and len(df_hist) >= 8:
             try:
                 t_hourly = np.arange(len(df_hist), dtype=float)
@@ -1176,6 +1196,7 @@ def run_simulation(
                         )
             except Exception as e:
                 logs.append(f"⚠️  {node}: błąd WeatherTrigger: {e}")
+        logs.append(f"⏱ {node}: WeatherTrigger.analyze() {time.perf_counter() - t_wtrig0:.2f}s")
 
         # ── własna ekstrapolacja trendu dla pozostałych parametrów ─────────
         # (temp_avg już mamy z v4_forecast powyżej — reużywamy go zamiast
@@ -1202,9 +1223,11 @@ def run_simulation(
         own_pull_rows: list[dict] = []
 
         # ── prognoza Open-Meteo ─────────────────────────────────────────────
+        t_fc0 = time.perf_counter()
         try:
             df_fc = _fetch_forecast(lat, lon, forecast_days)
             daily = _daily_stats(df_fc)
+            logs.append(f"⏱ {node}: pobieranie prognozy (sieć Open-Meteo forecast) {time.perf_counter() - t_fc0:.2f}s")
         except Exception as e:
             # PAD SERWERA: żywe Open-Meteo Forecast API nie odpowiada. Zamiast
             # tracić całą stację (jak wcześniej - "✗ błąd prognozy", zero
@@ -1255,6 +1278,7 @@ def run_simulation(
             logs.append(f"⚠️  {node}: {n} wierszy z fallbacku (⚠️FB w kolumnie Typ) - to NIE jest świeża prognoza Open-Meteo")
             continue
 
+        t_days0 = time.perf_counter()
         try:
             for day_idx, (day_dt, row_s) in enumerate(daily.iterrows()):
                 day_label = day_dt.date()
@@ -1436,7 +1460,9 @@ def run_simulation(
             # normalnej ścieżki (żywe Open-Meteo) - fallback ⚠️FB i Tryb Demo
             # nie wywołują tego (fallback sam pochodzi z CSV, dopisywanie
             # byłoby kołowe; Demo to gołe "–", nic sensownego do zapisania).
+            t_autosave0 = time.perf_counter()
             _autosave_forecast_to_csv(_SNAPSHOTS_CSV, node, str(date.today()), own_pull_rows)
+            logs.append(f"⏱ {node}: formatowanie dni + autosave CSV {time.perf_counter() - t_days0:.2f}s (z tego autosave {time.perf_counter() - t_autosave0:.2f}s)")
 
             # DODANE: automatyczne uzupełnienie RZECZYWISTYCH obserwacji za
             # dni, które już minęły (patrz _backfill_real_observations() po
@@ -1445,10 +1471,13 @@ def run_simulation(
             # pary do porównania). Ta sama ścieżka HTTP co _fetch_historical
             # wyżej, więc nic nowego sieciowo - tylko dopisanie brakujących
             # dni jako osobny wiersz per stacja.
+            t_backfill0 = time.perf_counter()
             _backfill_real_observations(_SNAPSHOTS_CSV, node, lat, lon)
+            logs.append(f"⏱ {node}: backfill rzeczywistych obserwacji (sieć) {time.perf_counter() - t_backfill0:.2f}s")
 
         except Exception as e:
             logs.append(f"✗  {node}: błąd prognozy: {e}")
+        logs.append(f"⏱ {node}: RAZEM {time.perf_counter() - t_node0:.2f}s")
 
     df_out = pd.DataFrame(rows)
     # porządkowanie kolumn
