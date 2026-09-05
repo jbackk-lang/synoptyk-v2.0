@@ -1070,10 +1070,25 @@ def run_simulation(
         # rzeczywistości analiza nigdy się nie wykonywała. Teraz błąd trafia
         # do Dziennika zamiast znikać po cichu - żeby taki regres nie mógł
         # się już ukryć bez śladu.
+        # DODANE: próg K sygnału 'rezonans' skalibrowany na realnych danych
+        # (forecaster/resonance_calibration.py) zamiast sztywnego 3 - patrz
+        # TIMDRAnalyzer.from_calibrated(). Jeśli sparowanych dni
+        # prognoza+rzeczywistość jest za mało (typowy stan na razie - CSV
+        # dopiero rośnie), from_calibrated() sam po cichu wraca do
+        # DEFAULT_RESONANCE_K=3 (status="insufficient_data") - logujemy to
+        # samo uczciwie, tym samym wzorcem co bias_correction wyżej, żeby
+        # było widać w Dzienniku, czy kalibracja faktycznie coś zmieniła.
         timdr_results: dict = {}
         if _TIMDR_OK and df_hist is not None:
             try:
-                analyzer = TIMDRAnalyzer(station=node)
+                analyzer, _resonance_calib = TIMDRAnalyzer.from_calibrated(_SNAPSHOTS_CSV, station=node)
+                if _resonance_calib["status"] == "calibrated":
+                    logs.append(
+                        f"🎯 {node}: kalibracja rezonansu aktywna - K={analyzer.resonance_k} "
+                        f"(mae_rezonans={_resonance_calib['mae_resonance']}, "
+                        f"mae_normalne={_resonance_calib['mae_normal']}, "
+                        f"n={_resonance_calib['n_resonance_days']}/{_resonance_calib['n_normal_days']})"
+                    )
                 timdr_results = analyzer.analyze(_adapt_for_timdr(df_hist))
             except Exception as e:
                 logs.append(f"⚠️  {node}: błąd analizy TIMDR (sygnały ⚡): {e}")
