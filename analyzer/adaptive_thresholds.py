@@ -26,8 +26,36 @@ class AdaptiveThresholds:
         # niż sztywna stała, bo dopasowane do realnej skali parametru,
         # gorsze niż prawdziwa klimatologia (bo "normalne" definiowane jest
         # przez samo okno, więc nie złapie anomalii obecnej przez całe okno).
-        self.fallback_df = None
-    
+        self._fallback_df = None
+        # NAPRAWIONE (wydajność - "GUI liczy 10x dłużej po zwiększeniu
+        # suwaka Historia (dni)"): get_thresholds() w gałęzi "brak
+        # climatology" niżej odpytuje SQLite (self.cache.load_last_n_days)
+        # PRZY KAŻDYM wywołaniu. analyze() w timdr_analyzer.py woła
+        # get_thresholds() raz na (wiersz, parametr) w pętli po całej
+        # historii godzinowej - przy 30 dniach historii (~720 wierszy) x 5
+        # parametrów x kilka sprawdzeń (anomalia/defekt/skręt) to tysiące
+        # zapytań SQL, mimo że wynik i tak ZAWSZE ląduje na tym samym
+        # fallback_df w typowym użyciu tego GUI (weather_cache.db jest
+        # pusta, patrz komentarz w get_thresholds niżej) - realny koszt
+        # SQL round-tripu płacony tysiące razy tylko po to, żeby i tak
+        # spaść na fallback. Wynik dla danej pary (miesiąc, parametr) jest
+        # identyczny przy KAŻDYM wywołaniu w ramach jednego analyze()
+        # (fallback_df się nie zmienia w trakcie) - cache keyowany (month,
+        # param) redukuje to do garstki realnych obliczeń. Czyszczony
+        # automatycznie przy każdym przypisaniu fallback_df (patrz property
+        # niżej), żeby nie oddać po cichu przestarzałych progów z
+        # poprzedniej stacji/przebiegu.
+        self._thresholds_cache: dict = {}
+
+    @property
+    def fallback_df(self):
+        return self._fallback_df
+
+    @fallback_df.setter
+    def fallback_df(self, df):
+        self._fallback_df = df
+        self._thresholds_cache = {}
+
     def _load_climatology(self):
         df = self.cache.load_climatology(self.station)
         # Uwaga: nawet gdy dla tej stacji nie ma jeszcze wyliczonej klimatologii,
@@ -42,7 +70,11 @@ class AdaptiveThresholds:
     
     def get_thresholds(self, dt: datetime, param: str) -> dict:
         month = dt.month
-        
+        cache_key = (month, param)
+        cached = self._thresholds_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         if (month, param) in self.climatology.index:
             row = self.climatology.loc[(month, param)]
             mean = row['mean']
@@ -54,7 +86,9 @@ class AdaptiveThresholds:
             if df_recent.empty or param not in df_recent.columns:
                 df_recent = self.fallback_df
             if df_recent is None or df_recent.empty or param not in df_recent.columns:
-                return {'mean': 0, 'std': 1, 'low': -2, 'high': 2, 'p10': -1, 'p90': 1, 'threshold_skret': 1, 'threshold_defekt': 1}
+                result = {'mean': 0, 'std': 1, 'low': -2, 'high': 2, 'p10': -1, 'p90': 1, 'threshold_skret': 1, 'threshold_defekt': 1}
+                self._thresholds_cache[cache_key] = result
+                return result
             mean = df_recent[param].mean()
             std = df_recent[param].std()
             p10 = df_recent[param].quantile(0.1)
@@ -62,9 +96,11 @@ class AdaptiveThresholds:
             if pd.isna(std) or std == 0:
                 std = 1.0  # n=1 albo stala wartosc w oknie - unikamy low==high
             if pd.isna(mean):
-                return {'mean': 0, 'std': 1, 'low': -2, 'high': 2, 'p10': -1, 'p90': 1, 'threshold_skret': 1, 'threshold_defekt': 1}
-        
-        return {
+                result = {'mean': 0, 'std': 1, 'low': -2, 'high': 2, 'p10': -1, 'p90': 1, 'threshold_skret': 1, 'threshold_defekt': 1}
+                self._thresholds_cache[cache_key] = result
+                return result
+
+        result = {
             'mean': mean,
             'std': std,
             'low': mean - 2*std,
@@ -74,6 +110,8 @@ class AdaptiveThresholds:
             'threshold_skret': 1.5 * std if std > 0 else 1.0,
             'threshold_defekt': 0.3 * (p90 - p10) if (p90 - p10) > 0 else 1.0
         }
+        self._thresholds_cache[cache_key] = result
+        return result
     
     def is_anomaly(self, value: float, dt: datetime, param: str) -> bool:
         thresholds = self.get_thresholds(dt, param)
