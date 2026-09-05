@@ -3,10 +3,49 @@ import pandas as pd
 from .adaptive_thresholds import AdaptiveThresholds
 from .wind_analyzer import WindAnalyzer
 
+# Próg K domyślny sygnału 'rezonans' (>= K jednocześnie anomalnych
+# parametrów). Wydzielony jako stała (zamiast "3" wpisanego wprost w
+# analyze()), żeby dało się go skalibrować na realnych danych - patrz
+# forecaster/resonance_calibration.py:calibrate_resonance oraz
+# TIMDRAnalyzer.from_calibrated() niżej.
+DEFAULT_RESONANCE_K = 3
+
+
 class TIMDRAnalyzer:
-    def __init__(self, station="krakow_balice"):
+    def __init__(self, station="krakow_balice", resonance_k: int = DEFAULT_RESONANCE_K):
+        """
+        resonance_k: próg K sygnału 'rezonans' (ile parametrów musi być
+        anomalnych JEDNOCZEŚNIE, żeby uznać dzień/wiersz za rezonansowy -
+        patrz `analyze()` niżej). Domyślnie 3 (zastane zachowanie, sprzed
+        wprowadzenia kalibracji). Użyj `from_calibrated()`, żeby zbudować
+        instancję z progiem wyliczonym na realnych danych.
+        """
         self.thresholds = AdaptiveThresholds(station)
-    
+        self.resonance_k = resonance_k
+
+    @classmethod
+    def from_calibrated(cls, csv_path: str, station: str = "krakow_balice",
+                         min_samples_per_group: int = 8) -> tuple["TIMDRAnalyzer", dict]:
+        """
+        Buduje TIMDRAnalyzer, którego próg K rezonansu jest skalibrowany na
+        realnych danych z `csv_path` (forecaster/resonance_calibration.py:
+        calibrate_resonance -> `recommended_k`). Zwraca (instancja,
+        wynik_kalibracji); przy `wynik_kalibracji["status"] ==
+        "insufficient_data"` instancja i tak dostaje bezpieczny domyślny
+        próg DEFAULT_RESONANCE_K (brak zmiany zachowania).
+
+        Import `forecaster.resonance_calibration` jest lokalny (nie na
+        szczycie pliku) celowo - TIMDRAnalyzer sam w sobie nie ma twardej
+        zależności od pakietu forecaster/pandas-CSV-IO, dopóki nikt
+        faktycznie nie prosi o kalibrację.
+        """
+        from forecaster.resonance_calibration import DEFAULT_K, calibrate_resonance
+
+        result = calibrate_resonance(csv_path, station=None, k=DEFAULT_K,
+                                      min_samples_per_group=min_samples_per_group)
+        k = result.get("recommended_k", DEFAULT_RESONANCE_K)
+        return cls(station=station, resonance_k=k), result
+
     def analyze(self, df: pd.DataFrame) -> dict:
         results = {
             'skręt': [],
@@ -58,8 +97,10 @@ class TIMDRAnalyzer:
                     if self.thresholds.is_defect(value, prev_value, dt, param):
                         results['defekt'].append((dt, param, value))
             
-            # 3. Rezonans – zgodność co najmniej 3 parametrów
-            if len(anomalies_today) >= 3:
+            # 3. Rezonans – zgodność co najmniej K parametrów (domyślnie 3,
+            # patrz DEFAULT_RESONANCE_K / self.resonance_k - kalibrowalne,
+            # patrz from_calibrated() i forecaster/resonance_calibration.py)
+            if len(anomalies_today) >= self.resonance_k:
                 results['rezonans'].append((dt, anomalies_today))
             
             # 4. Skręt trendu (potrzebuje okna)
