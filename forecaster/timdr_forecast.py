@@ -18,6 +18,16 @@ Różnica względem starego SynopticF (j_compress/j_decompress):
         w którym ufamy ekstrapolacji trendu.
   - wynik jest w pełni odtwarzalny (brak losowości) i zawiera jawne pasmo
     niepewności zamiast pojedynczej "magicznej" liczby.
+
+KALIBRACJA REZONANSU (DODANE - patrz forecaster/resonance_calibration.py):
+  wpływ 'rezonansu' na niepewność (`instability += 1.0` przy `rezonans_active`)
+  był dotąd STAŁY, nigdy nie zweryfikowanym na realnych danych założeniem.
+  `resonance_confidence_multiplier` (domyślnie 1.0 = brak zmiany zachowania)
+  skaluje ten wkład na podstawie tego, czy dni z rezonansem naprawdę miały
+  wyższy błąd prognozy niż dni bez niego (compute_bias-style porównanie na
+  krakow_forecast_snapshots.csv) - patrz `TIMDRForecast.from_calibrated()`
+  poniżej, żeby zbudować instancję z takiej kalibracji zamiast ręcznie
+  wyliczać mnożnik.
 """
 from __future__ import annotations
 
@@ -26,6 +36,7 @@ import pandas as pd
 from datetime import timedelta
 
 from .j_compress import j_compress
+from .resonance_calibration import DEFAULT_CONFIDENCE_MULTIPLIER, calibrate_resonance
 
 PARAMS = ["temp", "pressure", "humidity", "wind_speed"]
 
@@ -71,8 +82,45 @@ def _recent_signal_indices(timdr_results: dict, kind: str, param: str, n_rows: i
 
 
 class TIMDRForecast:
-    def __init__(self, figure_window_days: int = 7):
+    def __init__(self, figure_window_days: int = 7,
+                 resonance_confidence_multiplier: float = DEFAULT_CONFIDENCE_MULTIPLIER):
+        """
+        resonance_confidence_multiplier: mnożnik wkładu sygnału 'rezonans'
+        do niepewności prognozy (patrz `_forecast_param`, `rezonans_active`).
+        1.0 (domyślnie) = zachowanie identyczne jak przed kalibracją. Wartość
+        > 1.0 pochodzi zwykle z `resonance_calibration.calibrate_resonance()`
+        - patrz `from_calibrated()` niżej - i oznacza, że dni rezonansowe w
+        realnych danych faktycznie miały wyższy błąd prognozy, więc rezonans
+        powinien poszerzać niepewność MOCNIEJ niż stały wkład 1.0.
+        """
         self.figure_window_days = figure_window_days
+        self.resonance_confidence_multiplier = resonance_confidence_multiplier
+
+    @classmethod
+    def from_calibrated(cls, csv_path: str, station: str | None = None,
+                         figure_window_days: int = 7, k: int | None = None,
+                         min_samples_per_group: int = 8) -> tuple["TIMDRForecast", dict]:
+        """
+        Buduje TIMDRForecast, którego wkład rezonansu do niepewności jest
+        skalibrowany na realnych danych z `csv_path` (patrz
+        forecaster/resonance_calibration.py:calibrate_resonance).
+
+        Zwraca (instancja, wynik_kalibracji) - `wynik_kalibracji["status"]`
+        to "calibrated" albo "insufficient_data" (patrz tam) - wołający
+        (np. gui_app.py) może to zalogować/pokazać, zamiast cicho udawać,
+        że kalibracja zawsze się udaje. Przy "insufficient_data" instancja
+        i tak dostaje bezpieczny domyślny mnożnik 1.0 (brak zmiany
+        zachowania względem stanu sprzed kalibracji).
+        """
+        kwargs = {} if k is None else {"k": k}
+        result = calibrate_resonance(
+            csv_path, station=station, min_samples_per_group=min_samples_per_group, **kwargs,
+        )
+        instance = cls(
+            figure_window_days=figure_window_days,
+            resonance_confidence_multiplier=result["confidence_multiplier"],
+        )
+        return instance, result
 
     def _forecast_param(self, df: pd.DataFrame, param: str, steps: int, timdr_results: dict) -> dict:
         series = df[param].dropna().tolist()
@@ -114,8 +162,15 @@ class TIMDRForecast:
             instability += 0.5
             adjustments.append("defekt: poszerzone pasmo niepewności")
         if rezonans_active:
-            instability += 1.0
-            adjustments.append("rezonans: możliwa zmiana frontu, ekstrapolacja trendu ograniczona")
+            # NAPRAWIONE: wkład rezonansu był stałym 1.0, nigdy nie
+            # zweryfikowanym na realnych danych. Teraz skalowany przez
+            # resonance_confidence_multiplier (domyślnie 1.0 == bez zmian) -
+            # patrz forecaster/resonance_calibration.py i docstring modułu.
+            instability += 1.0 * self.resonance_confidence_multiplier
+            adjustments.append(
+                "rezonans: możliwa zmiana frontu, ekstrapolacja trendu ograniczona "
+                f"(mnożnik kalibracji={self.resonance_confidence_multiplier:.2f})"
+            )
 
         mean_reversion_weight = min(0.6, instability * 0.2)  # 0 (brak) .. 0.6 (max)
         uncertainty_multiplier = 1.0 + instability * 0.5
