@@ -23,13 +23,15 @@ kolumn 'datetime'/'temp'/'pressure'/'humidity'/'wind_speed'/'precip' -
 snapshoty mają tylko DOBOWE min/avg/max_temp_c, pressure_hpa, wind_kmh,
 precip_mm - bez wilgotności). Rezonans jest tu rekonstruowany jako PROXY:
 dla każdej daty z realnym pomiarem liczymy, ile z DOSTĘPNYCH kanałów
-(temp, pressure, precip, wind) jest anomalnych względem mean±2*std całego
-okna kalibracji - dokładnie ta sama definicja "anomalii", co domyślna
-gałąź AdaptiveThresholds.get_thresholds() gdy brak klimatologii (patrz
-analyzer/adaptive_thresholds.py: `low = mean - 2*std, high = mean + 2*std`)
-- nie wymyślamy tu nowego progu. Traktować jako przybliżenie zbudowane na
-jedynych realnych danych, jakie w ogóle mamy sparowane z rzeczywistością,
-nie jako podmiankę prawdziwego TIMDRAnalyzer.analyze().
+(temp, pressure, precip, wind) jest anomalnych względem mean±2*std okna
+kalibracji Z POMINIĘCIEM TEJ DATY (leave-one-out - patrz NAPRAWIONE w
+_flag_resonance_days niżej; ta sama definicja "anomalii" co ongiś
+domyślna gałąź AdaptiveThresholds.get_thresholds() gdy brak klimatologii,
+patrz analyzer/adaptive_thresholds.py: `low = mean - 2*std, high = mean +
+2*std` - inny, self-referential problem tamtego progu, patrz komentarz
+"NAPRAWIONE" tam, nie jest tu naprawiany). Traktować jako przybliżenie
+zbudowane na jedynych realnych danych, jakie w ogóle mamy sparowane z
+rzeczywistością, nie jako podmiankę prawdziwego TIMDRAnalyzer.analyze().
 
 UCZCIWOŚĆ (ten sam wzorzec co bias_correction.compute_lead_bias i co
 protokół testowania z timdr-signal-framework: "test bez mocy = brak
@@ -94,7 +96,27 @@ def _load_real_multi_channel(csv_path: str, station: str | None = None) -> pd.Da
 def _flag_resonance_days(real_df: pd.DataFrame, k: int = DEFAULT_K) -> pd.Series:
     """PROXY rezonansu na danych dobowych z CSV - patrz docstring modułu.
     Dzień jest "rezonansowy", gdy >= k z dostępnych kanałów jest anomalnych
-    (poza mean±2*std całego okna kalibracji) TEGO SAMEGO dnia.
+    (poza mean±2*std OKNA Z POMINIĘCIEM TEGO DNIA - leave-one-out) tego
+    samego dnia.
+
+    NAPRAWIONE (Pattern B - maskowanie przez samo-odnoszące się okno,
+    znalezione przy audycie ekosystemu TIMDR pod kątem progów liczonych z
+    tej samej próbki, która się testuje - ten sam mechanizm i ta sama
+    naprawa co w potomnym repo SYNOPTYK-ARCTIC/arctic_synoptyk/resonance.py
+    :flag_resonance_days i w FLIGHT-TRACKING-TIMDR/timdr_flight.py
+    :twist_3d, patrz tam po pełny opis): poprzednia wersja liczyła
+    mean±2*std RAZ na CAŁYM oknie kalibracji, WŁĄCZNIE z ocenianym dniem -
+    genuinny, duży skok tego dnia zawyżał własne std, co przy krótszych
+    oknach kalibracji (mniej niż dziesiątki dni) mogło maskować właśnie
+    najsilniejsze anomalie. Teraz każdy dzień oceniany jest względem progu
+    policzonego z POZOSTAŁYCH dni - liczone wektorowo (bez pętli po
+    wierszach) z sum/sum kwadratów, żeby uniknąć O(n²) jawnego pomijania
+    wiersza w pandas:
+        n'      = n - 1  (liczba pozostałych po wyłączeniu bieżącego dnia)
+        mean'_i = (Σx - x_i) / n'
+        var'_i  = [ (Σx² - x_i²) - (Σx - x_i)² / n' ] / (n' - 1)
+    co jest matematycznie równoważne policzeniu mean/std na `valid` bez
+    i-tego elementu, tylko bez pętli.
 
     Zwraca pd.Series[bool] indeksowany target_date (pusty Series, gdy
     real_df jest puste)."""
@@ -105,13 +127,27 @@ def _flag_resonance_days(real_df: pd.DataFrame, k: int = DEFAULT_K) -> pd.Series
     for col in real_df.columns:
         series = real_df[col]
         valid = series.dropna()
-        if len(valid) < 3:
+        n = len(valid)
+        # n' = n-1 musi być >=3 (ta sama minimalna próbka co poprzednio),
+        # więc potrzeba n>=4, żeby liczyć LOO na tym kanale w ogóle.
+        if n < 4:
             continue
-        mean, std = valid.mean(), valid.std()
-        if pd.isna(std) or std == 0:
-            continue
-        low, high = mean - 2 * std, mean + 2 * std
-        is_anomaly = ((series > high) | (series < low)).fillna(False)
+
+        s1 = valid.sum()
+        s2 = (valid ** 2).sum()
+        n_loo = n - 1
+        mean_loo = (s1 - valid) / n_loo
+        var_loo = ((s2 - valid ** 2) - (s1 - valid) ** 2 / n_loo) / (n_loo - 1)
+        # Zaokraglenia zmiennoprzecinkowe moga dac znikoma ujemna wariancje
+        # dla niemal-stalych okien - przycinamy do 0 zamiast propagowac NaN.
+        var_loo = var_loo.clip(lower=0)
+        std_loo = var_loo.pow(0.5)
+
+        std_loo_safe = std_loo.where(std_loo != 0)  # 0 -> NaN, zeby porownanie ponizej dalo False
+        low = mean_loo - 2 * std_loo_safe
+        high = mean_loo + 2 * std_loo_safe
+        is_anomaly_valid = (valid > high) | (valid < low)
+        is_anomaly = is_anomaly_valid.reindex(series.index, fill_value=False).fillna(False)
         anomaly_counts = anomaly_counts.add(is_anomaly.astype(int), fill_value=0)
 
     return anomaly_counts >= k
@@ -139,20 +175,31 @@ def _load_pairs_by_date(
 
     real_by_date = real.groupby("target_date")[real_col].last()
 
-    rows = []
-    for _, r in fc.iterrows():
-        real_val = real_by_date.get(r["target_date"])
-        if real_val is None or pd.isna(real_val):
-            continue
-        if forecast_col not in r or pd.isna(r.get(forecast_col)) or pd.isna(r.get("lead_days")):
-            continue
-        rows.append({
-            "target_date": r["target_date"],
-            "lead_days": int(r["lead_days"]),
-            "forecast": float(r[forecast_col]),
-            "real": float(real_val),
-        })
-    return pd.DataFrame(rows, columns=columns)
+    # NAPRAWIONE (wydajność - profiler: 0,79s w calibrate_resonance()):
+    # `for _, r in fc.iterrows(): ...` to klasyczny pandas-antywzorzec -
+    # iterrows() opakowuje KAŻDY wiersz w nowy obiekt Series (drogie), a tu
+    # wywoływane raz na wiersz prognozy w rosnącym CSV. Zastąpione operacją
+    # wektorową: `.map()` dla dopasowania real_by_date po dacie (dokładny
+    # odpowiednik `real_by_date.get(...)` z pętli, tylko na całej kolumnie
+    # naraz), potem `dropna()` zamiast ręcznych warunków `is None`/`isna()`
+    # w pętli - ten sam efekt (odrzucenie wierszy bez pary/z brakami), bez
+    # przechodzenia przez Python-owy interpreter wiersz po wierszu.
+    if forecast_col not in fc.columns:
+        return pd.DataFrame(columns=columns)
+
+    out = pd.DataFrame({
+        "target_date": fc["target_date"],
+        "lead_days": fc["lead_days"],
+        "forecast": fc[forecast_col],
+        "real": fc["target_date"].map(real_by_date),
+    })
+    out = out.dropna(subset=["forecast", "lead_days", "real"])
+    if out.empty:
+        return pd.DataFrame(columns=columns)
+    out["lead_days"] = out["lead_days"].astype(int)
+    out["forecast"] = out["forecast"].astype(float)
+    out["real"] = out["real"].astype(float)
+    return out.reset_index(drop=True)[columns]
 
 
 def _insufficient(k: int, n_res: int, n_normal: int, reason: str) -> dict:
