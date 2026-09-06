@@ -4,6 +4,26 @@ import numpy as np
 from datetime import datetime
 from data.cache import WeatherCache
 
+
+class _LooThresholdMap:
+    """Wynik get_thresholds() dla gałęzi fallback PO naprawie Pattern B:
+    zamiast jednego progu dzielonego przez cały (month, param), trzyma
+    słownik {klucz_wiersza: próg}, jeden próg leave-one-out na wiersz -
+    patrz duży komentarz "NAPRAWIONE" w AdaptiveThresholds.get_thresholds.
+    `use_timestamp_key=True`, gdy klucze to pd.Timestamp (kolumna
+    'datetime' dostępna) - `lookup(dt)` normalizuje wtedy `dt` tym samym
+    sposobem przed odpytaniem słownika."""
+
+    def __init__(self, loo_map: dict, degenerate: dict, use_timestamp_key: bool):
+        self._loo_map = loo_map
+        self._degenerate = degenerate
+        self._use_timestamp_key = use_timestamp_key
+
+    def lookup(self, dt) -> dict:
+        key = pd.Timestamp(dt) if self._use_timestamp_key else dt
+        return self._loo_map.get(key, self._degenerate)
+
+
 class AdaptiveThresholds:
     def __init__(self, station="krakow_balice", db_path="weather_cache.db"):
         self.station = station
@@ -68,50 +88,133 @@ class AdaptiveThresholds:
                 .set_index(['month', 'param'])
         return df.set_index(['month', 'param'])
     
+    @staticmethod
+    def _degenerate_result() -> dict:
+        return {'mean': 0, 'std': 1, 'low': -2, 'high': 2, 'p10': -1, 'p90': 1,
+                'threshold_skret': 1, 'threshold_defekt': 1}
+
+    @staticmethod
+    def _build_result(mean, std, p10, p90) -> dict:
+        if pd.isna(std) or std == 0:
+            std = 1.0  # n=1 albo stala wartosc w oknie - unikamy low==high
+        return {
+            'mean': mean,
+            'std': std,
+            'low': mean - 2 * std,
+            'high': mean + 2 * std,
+            'p10': p10,
+            'p90': p90,
+            'threshold_skret': 1.5 * std if std > 0 else 1.0,
+            'threshold_defekt': 0.3 * (p90 - p10) if (p90 - p10) > 0 else 1.0,
+        }
+
     def get_thresholds(self, dt: datetime, param: str) -> dict:
+        """
+        NAPRAWIONE (Pattern B - maskowanie przez samo-odnoszące się okno,
+        znalezione przy audycie ekosystemu TIMDR pod kątem progów liczonych
+        z tej samej próbki, która się testuje - ten sam mechanizm co w
+        potomnych repo SYNOPTYK-ARCTIC/arctic_synoptyk/resonance.py
+        :flag_resonance_days, forecaster/resonance_calibration.py
+        :_flag_resonance_days i FLIGHT-TRACKING-TIMDR/timdr_flight.py
+        :twist_3d - to jest PIERWOTNE (ancestor) miejsce tego wzorca w
+        ekosystemie, więc naprawa jest tu najważniejsza mimo najbardziej
+        złożonej implementacji):
+
+        Gałąź "brak klimatologii" liczyła RAZ mean/std per (month, param) na
+        CAŁYM `df_recent`/`fallback_df` i dzieliła ten SAM próg między
+        WSZYSTKIE wiersze tego miesiąca - czyli wartość ocenianego wiersza
+        sama współtworzyła próg, którym była oceniana (a `fallback_df` to
+        dosłownie "ten sam df, który i tak jest analizowany" - patrz
+        `analyzer/timdr_analyzer.py:analyze()`). Przy krótkim oknie
+        (użytkownik GUI może ustawić suwak "Historia (dni)" nisko) genuinny
+        duży skok mógł zawyżyć własne std na tyle, że nigdy nie przekroczył
+        progu.
+
+        Naprawiono: gałąź fallback liczy teraz próg PER WIERSZ metodą
+        leave-one-out (mean/std z pominięciem tego konkretnego wiersza),
+        wektorowo przez sumy/sumy kwadratów (ta sama technika co w
+        forecaster/resonance_calibration.py:_flag_resonance_days - patrz
+        tam po wyprowadzenie wzoru), więc amortyzowany koszt per wywołanie
+        `get_thresholds()` pozostaje O(1) (cache nadal trzyma WYNIK
+        policzony raz na (month, param), tylko teraz jest to slownik
+        {timestamp: próg}, nie pojedynczy próg) - nie cofa to wcześniejszej
+        naprawy wydajności opisanej w __init__.
+
+        UCZCIWE OGRANICZENIE (świadomie NIE naprawione tutaj): `p10`/`p90`
+        (i pochodny `threshold_defekt`) NADAL liczone są z całego okna
+        WŁĄCZNIE z ocenianym wierszem - kwantyle 10/90 percentyla są dużo
+        mniej podatne na zawyżenie przez pojedynczy punkt niż mean/std
+        (jeden punkt rzadko przesuwa 10. czy 90. percentyl), więc ryzyko
+        maskowania jest tu wyraźnie mniejsze niż dla mean±2*std - ale nie
+        zerowe przy bardzo małych oknach. Gałąź klimatologii (dane
+        historyczne, nie to samo okno co analizowane) NIE jest tu
+        zmieniana - nie jest samo-odnosząca się w tym samym sensie.
+        """
         month = dt.month
         cache_key = (month, param)
         cached = self._thresholds_cache.get(cache_key)
         if cached is not None:
+            if isinstance(cached, _LooThresholdMap):
+                return cached.lookup(dt)
             return cached
 
         if (month, param) in self.climatology.index:
             row = self.climatology.loc[(month, param)]
-            mean = row['mean']
-            std = row['std']
-            p10 = row['p10']
-            p90 = row['p90']
-        else:
-            df_recent = self.cache.load_last_n_days(30)
-            if df_recent.empty or param not in df_recent.columns:
-                df_recent = self.fallback_df
-            if df_recent is None or df_recent.empty or param not in df_recent.columns:
-                result = {'mean': 0, 'std': 1, 'low': -2, 'high': 2, 'p10': -1, 'p90': 1, 'threshold_skret': 1, 'threshold_defekt': 1}
-                self._thresholds_cache[cache_key] = result
-                return result
-            mean = df_recent[param].mean()
-            std = df_recent[param].std()
-            p10 = df_recent[param].quantile(0.1)
-            p90 = df_recent[param].quantile(0.9)
-            if pd.isna(std) or std == 0:
-                std = 1.0  # n=1 albo stala wartosc w oknie - unikamy low==high
-            if pd.isna(mean):
-                result = {'mean': 0, 'std': 1, 'low': -2, 'high': 2, 'p10': -1, 'p90': 1, 'threshold_skret': 1, 'threshold_defekt': 1}
-                self._thresholds_cache[cache_key] = result
-                return result
+            result = self._build_result(row['mean'], row['std'], row['p10'], row['p90'])
+            self._thresholds_cache[cache_key] = result
+            return result
 
-        result = {
-            'mean': mean,
-            'std': std,
-            'low': mean - 2*std,
-            'high': mean + 2*std,
-            'p10': p10,
-            'p90': p90,
-            'threshold_skret': 1.5 * std if std > 0 else 1.0,
-            'threshold_defekt': 0.3 * (p90 - p10) if (p90 - p10) > 0 else 1.0
+        df_recent = self.cache.load_last_n_days(30)
+        if df_recent.empty or param not in df_recent.columns:
+            df_recent = self.fallback_df
+        if df_recent is None or df_recent.empty or param not in df_recent.columns:
+            result = self._degenerate_result()
+            self._thresholds_cache[cache_key] = result
+            return result
+
+        if 'datetime' not in df_recent.columns:
+            # Bez kolumny 'datetime' nie ma jak dopasowac progu LOO do
+            # konkretnego wiersza (klucz musialby byc pozycyjnym indeksem,
+            # ktory nie odpowiada `dt` przekazywanemu do get_thresholds) -
+            # w praktyce nieosiagalne (oba zrodla df_recent - WeatherCache.
+            # load_last_n_days i analyze()'s wlasne `df` - zawsze maja te
+            # kolumne, patrz data/cache.py:_init_db i testy), ale
+            # bezpieczniej jawnie zwrocic prog domyslny niz cicho policzyc
+            # go zle.
+            result = self._degenerate_result()
+            self._thresholds_cache[cache_key] = result
+            return result
+
+        dt_col = pd.to_datetime(df_recent['datetime'])
+        month_mask = dt_col.dt.month == month
+        series = df_recent.loc[month_mask, param]
+        valid = series.dropna()
+        n = len(valid)
+        if n < 4:
+            # Za mało punktów, żeby LOO (n'=n-1 musi być >=3) miało sens -
+            # ten sam próg minimalnej próbki co gdzie indziej w ekosystemie.
+            result = self._degenerate_result()
+            self._thresholds_cache[cache_key] = result
+            return result
+
+        p10 = valid.quantile(0.1)
+        p90 = valid.quantile(0.9)
+
+        s1, s2 = valid.sum(), (valid ** 2).sum()
+        n_loo = n - 1
+        mean_loo = (s1 - valid) / n_loo
+        var_loo = ((s2 - valid ** 2) - (s1 - valid) ** 2 / n_loo) / (n_loo - 1)
+        var_loo = var_loo.clip(lower=0)
+        std_loo = var_loo.pow(0.5)
+
+        keys = dt_col.loc[valid.index].map(pd.Timestamp)
+        loo_map = {
+            key: self._build_result(mean_loo.loc[i], std_loo.loc[i], p10, p90)
+            for i, key in keys.items()
         }
-        self._thresholds_cache[cache_key] = result
-        return result
+        result_map = _LooThresholdMap(loo_map, self._degenerate_result(), use_timestamp_key=True)
+        self._thresholds_cache[cache_key] = result_map
+        return result_map.lookup(dt)
     
     def is_anomaly(self, value: float, dt: datetime, param: str) -> bool:
         thresholds = self.get_thresholds(dt, param)
