@@ -1,0 +1,41 @@
+{
+  "system": {
+    "engine_name": "SYNOPTYK-F",
+    "version": "2.4.0",
+    "mode": "operational",
+    "debug": false
+  },
+  "wavelet_analysis": {
+    "wavelet_family": "db4",
+    "decomposition_level": 2,
+    "boundary_mode": "symmetric",
+    "thresholding": {
+      "method": "soft",
+      "factor": 1.0
+    }
+  },
+  "spatial_mesh": {
+    "default_resolution_deg": 0.125,
+    "topography_dem_resolution_m": 30,
+    "regions": {
+      "malopolska": {
+        "bbox": [49.1, 50.5, 19.0, 21.5],
+        "primary_node": "Krakow_Center"
+      },
+      "poland": {
+        "bbox": [49.0, 54.8, 14.1, 24.1],
+        "primary_node": "Warszawa"
+      },
+      "europe": {
+        "bbox": [35.0, 71.0, -10.0, 40.0],
+        "primary_node": "Berlin"
+      }
+    }
+  },
+  "physics_corrections": {
+    "temperature_lapse_rate_deg_per_100m": 0.65,
+    "uhi_weight": 1.0,
+    "convective_threshold_humidity_pct": 70.0,
+    "precipitation_resonance_trigger": 0.45
+  }
+}

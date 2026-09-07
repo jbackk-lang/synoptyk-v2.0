@@ -1,0 +1,23 @@
+# config.yaml
+stations:
+  krakow_balice:
+    lat: 50.083
+    lon: 19.917
+    name: "Kraków-Balice"
+  warszawa:
+    lat: 52.237
+    lon: 21.017
+    name: "Warszawa"
+
+data_sources:
+  open_meteo:
+    enabled: true
+    archive_url: "https://archive-api.open-meteo.com/v1/archive"
+
+cache:
+  enabled: true
+  db_path: "weather_cache.db"
+  retention_days: 90
+
+analysis:
+  default_days: 7
