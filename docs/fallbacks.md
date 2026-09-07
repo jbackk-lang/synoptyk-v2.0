@@ -18,7 +18,41 @@ Pełne metadane tylko dla 7 miast (Warszawa, Kraków, Gdańsk, Wrocław, Poznań
 
 ## `AdaptiveThresholds.fallback_df` — kalibracja na żywo
 
-Gdy `weather_cache.db`/klimatologia są puste, "normalność" liczona jest z tego samego okna, które analizuje — front pogodowy obecny przez całe okno (np. 7 dni ciągłego deszczu) **nie zostanie wykryty jako anomalia**, bo sam podniesie średnią (self-baseline blind spot). Dodatkowo `threshold_defekt` (skok między kolejnymi punktami) jest wrażliwy na czysty szum pomiarowy przy krótkich/niegładkich seriach — im bardziej "poszarpane" dane wejściowe, tym więcej fałszywych `defekt`. Realne dane z Open-Meteo (godzinowe, skorelowane w czasie) są znacznie gładsze niż losowy szum, więc w praktyce powinno to być rzadsze niż w syntetycznych testach.
+Gdy `weather_cache.db`/klimatologia są puste, "normalność" liczona jest z tego samego okna, które analizuje. Dodatkowo `threshold_defekt` (skok między kolejnymi punktami) jest wrażliwy na czysty szum pomiarowy przy krótkich/niegładkich seriach — im bardziej "poszarpane" dane wejściowe, tym więcej fałszywych `defekt`. Realne dane z Open-Meteo (godzinowe, skorelowane w czasie) są znacznie gładsze niż losowy szum, więc w praktyce powinno to być rzadsze niż w syntetycznych testach.
+
+### NAPRAWIONE: pojedynczy punkt zawyżał własny próg (Pattern B, maskowanie)
+
+Znalezione przy audycie ekosystemu TIMDR pod kątem progów liczonych z tej
+samej próbki, którą się testuje (ten sam mechanizm i ta sama naprawa co w
+potomnych repo `SYNOPTYK-ARCTIC/arctic_synoptyk/resonance.py`,
+`forecaster/resonance_calibration.py:_flag_resonance_days` i
+`FLIGHT-TRACKING-TIMDR/timdr_flight.py:twist_3d`). `get_thresholds()`
+liczyło RAZ mean/std per (miesiąc, parametr) na całym `fallback_df` i
+dzieliło ten sam próg między wszystkie wiersze tego miesiąca — wartość
+ocenianego wiersza sama współtworzyła próg, którym była oceniana. Przy
+krótkim oknie (mały suwak "Historia (dni)") pojedynczy, genuinny duży
+skok mógł zawyżyć własne std na tyle, że nigdy nie przekraczał progu,
+niezależnie od tego, jak duży był.
+
+**Naprawa**: gałąź fallback liczy teraz próg PER WIERSZ metodą
+leave-one-out — mean/std z pominięciem akurat tego wiersza — wektorowo
+(sumy/sumy kwadratów), więc bez powrotu do kosztu O(n) per wywołanie,
+który został naprawiony osobno niżej. Zweryfikowane testami w
+`analyzer/test_adaptive_thresholds.py` (m.in. skok do 20x amplitudy
+bazowej na oknie n=4+1, który stara metoda maskowała bezwarunkowo, nowa
+wykrywa zawsze) — pełny zestaw repo: 95/95 przechodzi.
+
+**Uczciwe ograniczenie (świadomie NIE naprawione)**: leave-one-out
+usuwa maskowanie PRZEZ JEDEN punkt, ale NIE rozwiązuje opisanego niżej
+"self-baseline blind spot" dla frontu pogodowego obecnego przez CAŁE
+okno (np. 7 dni ciągłego deszczu) — wykluczenie jednego dnia wciąż
+zostawia pozostałe dni tego samego frontu jako większość próbki, więc
+one nadal dominują (i przesuwają) obliczaną linię bazową. To jest
+fundamentalnie inny, trudniejszy problem niż maskowanie pojedynczego
+outliera — wymagałby zewnętrznej klimatologii (danych spoza ocenianego
+okna), nie samej zmiany formuły progu. `threshold_defekt` (p10/p90) też
+NIE jest tu liczony leave-one-out — patrz komentarz "UCZCIWE
+OGRANICZENIE" w `adaptive_thresholds.py:get_thresholds`.
 
 ## NAPRAWIONE: `get_thresholds()` odpytywał SQLite przy KAŻDYM wywołaniu — "GUI liczy 10x dłużej po zwiększeniu suwaka Historia (dni)"
 

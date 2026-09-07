@@ -40,7 +40,7 @@ class _FakeThresholds:
     def is_defect(self, current, previous, dt, param):
         return False
 
-    def is_trend_reversal(self, series, dt, param):
+    def is_trend_reversal(self, diff_curr, diff_prev, dt, param):
         return False
 
 
