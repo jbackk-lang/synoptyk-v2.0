@@ -174,6 +174,7 @@ synoptyk-v2.0/
 - [`docs/weather_trigger.md`](docs/weather_trigger.md) — czujnik zdarzeń, priorytety, przykład kodu.
 - [`docs/bias_correction.md`](docs/bias_correction.md) — korekta obciążenia (3 tabele), naprawiona circularity, porównanie z V4.
 - [`docs/fallbacks.md`](docs/fallbacks.md) — `⚠️FB`, opóźnienie Open-Meteo Archive, fallback współrzędnych, `AdaptiveThresholds.fallback_df`.
+- [`docs/RAPORT_REALNY.md`](docs/RAPORT_REALNY.md) — realna trafność (bias/MAE per lead_days, 4 stacje), policzona bezpośrednio z `compute_lead_bias()` na prawdziwym CSV; zastępuje usunięty, niepodparty kodem `RAPORT.md`.
 
 Ciśnienie w całym pliku (prognoza i historia) to `pressure_msl` (poziom morza), nie `surface_pressure` (stacyjne).
 
